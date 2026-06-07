@@ -1,16 +1,18 @@
 ---
 name: context-architecture
-description: Bootstrap and operate a map-first local context wiki for agent work. Deterministic scripts own all routine (locks, ledgers, validation, rendering). LLMs own only judgment calls (significance, routing, rationale).
-context_architecture:
-  contract_version: 1
-  default_role: readonly
-  permission_profiles: templates/permission-profiles.json
+description: "Bootstrap and operate deterministic repo-local context architecture for Codex/Claude-style agent work: map-first context wiki, locks, ledgers, agent tree, decision graph, freshness routing, validation, and low-context multi-agent coordination."
+metadata:
+  context_architecture:
+    contract_version: 1
+    default_role: readonly
+    permission_profiles: templates/permission-profiles.json
 ---
 
 Use when:
 - The user wants persistent project context, agent memory architecture, or multi-agent coordination
 - Starting a new project that needs structured documentation
 - An existing project needs a context system bootstrapped
+- The user asks for a deterministic context control plane, ledger, locks, decision graph, or context hygiene
 
 ## Operating Principle
 
@@ -33,16 +35,18 @@ All writes must be surgical. Produce ONLY what was asked. No adjacent cleanup, n
 
 ## Workflow
 
+For bundled scripts, set `SKILL_DIR` to the directory containing this `SKILL.md`. In Codex this is normally the active skill folder, for example `~/.codex/skills/context-architecture` when installed locally. If the user says "this repo" and gives no target, use the current working directory as the target.
+
 ### Bootstrap (new project)
 ```bash
-python <skill_dir>/scripts/bootstrap.py --target /path/to/project --scan
+python "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --scan
 ```
 Scans repo, presents findings batch-style, asks targeted questions for ambiguities, generates full context/ skeleton.
 
 ### Absorb Existing Docs
 When a project already has documentation (README, ANALYSIS.md, wiki exports, etc.), `bootstrap.py --scan` reports headed doc import candidates. Import is explicit and small:
 ```bash
-python <skill_dir>/scripts/bootstrap.py --target /path/to/project --absorb-docs
+python "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --absorb-docs
 ```
 This creates headed HTML pages, copies originals under `context/archived/`, and links pages into the index. Do not create pages from chat automatically.
 
@@ -99,7 +103,7 @@ python context/scripts/validate.py
 ## Verification (smoke test)
 
 ```bash
-bash <skill_dir>/smoke.sh
+bash "$SKILL_DIR/smoke.sh"
 ```
 
 Exercises full lifecycle and contract failures: bootstrap → lock contention → stale lock break → route/freshness → track repair → reachability/hygiene → decision validation → close validation warning → docs. Exit 0 = all pass. Run after any script change.

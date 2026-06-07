@@ -1,0 +1,4 @@
+interface:
+  display_name: "Context Architecture"
+  short_description: "Bootstrap deterministic repo context"
+  default_prompt: "Use $context-architecture to bootstrap deterministic context for this repo."
