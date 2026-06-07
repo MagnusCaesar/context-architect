@@ -9,9 +9,12 @@ import sys
 from pathlib import Path
 
 from context_utils import (
+    agent_role,
     append_ledger_event,
     find_context_root,
+    has_permission,
     now_utc,
+    permission_denied,
     read_meta,
     remove_active_lock,
     set_meta_in_content,
@@ -21,6 +24,9 @@ from context_utils import (
 
 
 def release_lock(context_root: Path, page: str, agent_id: str) -> dict:
+    if not has_permission(context_root, agent_id, "release_lock"):
+        return permission_denied(agent_id, "release_lock", agent_role(context_root, agent_id))
+
     page_path = context_root / page
     if not page_path.exists():
         result = {"status": "release_denied_wrong_owner", "released": False, "reason": f"{page} does not exist"}
@@ -34,14 +40,17 @@ def release_lock(context_root: Path, page: str, agent_id: str) -> dict:
         return result
 
     locked_by = read_meta(page_path, "locked-by")
+    forced = False
     if locked_by and locked_by != agent_id:
-        result = {
-            "status": "release_denied_wrong_owner",
-            "released": False,
-            "reason": f"locked by {locked_by}, not {agent_id}",
-        }
-        append_ledger_event(context_root, "release", page, agent_id, result["status"], result["reason"])
-        return result
+        if not has_permission(context_root, agent_id, "force_release_lock"):
+            result = {
+                "status": "release_denied_wrong_owner",
+                "released": False,
+                "reason": f"locked by {locked_by}, not {agent_id}",
+            }
+            append_ledger_event(context_root, "release", page, agent_id, result["status"], result["reason"])
+            return result
+        forced = True
 
     content = page_path.read_text(errors="replace")
     content = set_meta_in_content(content, "locked", "false")
@@ -50,10 +59,11 @@ def release_lock(context_root: Path, page: str, agent_id: str) -> dict:
     content = set_meta_in_content(content, "updated", now_utc()[:10])
     content = set_meta_in_content(content, "reviewed-at", now_utc())
     write_atomic(page_path, content, context_root=context_root)
-    remove_active_lock(context_root, page, agent_id)
+    remove_active_lock(context_root, page, locked_by if forced else agent_id)
 
-    result = {"status": "released", "released": True}
-    append_ledger_event(context_root, "release", page, agent_id, result["status"], "lock released")
+    result = {"status": "released", "released": True, "forced": forced}
+    details = f"forced release previous_owner={locked_by}" if forced else "lock released"
+    append_ledger_event(context_root, "release", page, agent_id, result["status"], details)
     return result
 
 
@@ -137,7 +147,7 @@ def main():
         docs_result = run_generate_docs(context_root)
 
     if not lock_result.get("released"):
-        status = "release_denied_wrong_owner"
+        status = lock_result.get("status", "release_denied_wrong_owner")
         instruction = f"Lock release failed: {lock_result.get('reason')}"
     elif not validate_result.get("passed", True):
         status = "validation_warning"

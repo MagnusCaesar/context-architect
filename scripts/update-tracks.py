@@ -7,9 +7,12 @@ import os
 import sys
 
 from context_utils import (
+    agent_role,
     append_ledger_event,
     find_context_root,
+    has_permission,
     parse_tracks,
+    permission_denied,
     read_meta,
     set_meta_in_content,
     write_atomic,
@@ -27,6 +30,9 @@ def main():
     context_root = find_context_root()
     if not context_root:
         print(json.dumps({"error": "No context/ directory found"}))
+        sys.exit(1)
+    if not has_permission(context_root, args.agent_id, "update_tracks"):
+        print(json.dumps(permission_denied(args.agent_id, "update_tracks", agent_role(context_root, args.agent_id)), indent=2))
         sys.exit(1)
     page_path = context_root / args.page
     if not page_path.exists():

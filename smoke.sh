@@ -105,9 +105,12 @@ cd "$TMP"
 # Verify structure
 step "index.html exists" test -f "$TMP/context/index.html"
 step "ledger.html exists" test -f "$TMP/context/ledger.html"
+step "ledger-events.ndjson exists" test -f "$TMP/context/ledger-events.ndjson"
+step "agent-tree.html exists" test -f "$TMP/context/agent-tree.html"
 step "decisions.html exists" test -f "$TMP/context/decisions.html"
 step "config.json exists" test -f "$TMP/context/config.json"
 step "scripts/ populated" test -f "$TMP/context/scripts/validate.py"
+step "harden-ledger helper copied" test -f "$TMP/context/scripts/harden-ledger.sh"
 
 echo ""
 echo "Phase 2: Task lifecycle"
@@ -118,6 +121,9 @@ step_output "start-task acquires lock" '"acquired": true' \
 
 step_output "daily hygiene auto-runs before first ledger event" 'data-event="daily_hygiene"' \
     grep -o 'data-event="daily_hygiene"' "$TMP/context/ledger.html"
+
+step_output "daily hygiene source log appended" '"event":"daily_hygiene"' \
+    grep -o '"event":"daily_hygiene"' "$TMP/context/ledger-events.ndjson"
 
 step_output "second writer blocked" '"status": "blocked_active_lock"' \
     python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "blocked smoke" --agent-id other-agent
@@ -156,9 +162,11 @@ if start != -1:
     s = s[:start + len('name="locked-at" content="2000-01-01T00:00:00Z')] + s[end:]
 p.write_text(s)
 PY
-step_output "stale lock broken" '"status": "broke_stale_lock"' \
+step_output "worker stale lock break blocked" '"action": "orchestrator_resolution_required"' \
     python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "break stale" --agent-id stale-breaker
-python3 "$TMP/context/scripts/close-task.py" --page decisions.html --summary "stale smoke" --agent-id stale-breaker --skip-docs >/dev/null
+step_output "orchestrator stale lock broken" '"status": "broke_stale_lock"' \
+    python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "break stale" --agent-id orchestrator
+python3 "$TMP/context/scripts/close-task.py" --page decisions.html --summary "stale smoke" --agent-id orchestrator --skip-docs >/dev/null
 
 echo ""
 echo "Phase 3: Utilities"
@@ -173,6 +181,15 @@ step "check-freshness.py runs" \
 
 python3 "$TMP/context/scripts/check-reachability.py" --json > /tmp/reachability.json
 step_json_file "reachability fallback root warning" /tmp/reachability.json "data['fallback_root'] is True and data['root'] == 'context/index.html'"
+
+python3 "$TMP/context/scripts/record-agent.py" --agent-id worker-1 --parent-id orchestrator --role verifier --task "check decisions" --page decisions.html --status spawned --actor-id orchestrator >/tmp/agent-spawn.json
+step_json_file "record-agent records spawn" /tmp/agent-spawn.json "data['status'] == 'recorded' and data['ledger_appended'] is True"
+step_output "agent tree row rendered" 'data-agent="worker-1"' \
+    grep -o 'data-agent="worker-1"' "$TMP/context/agent-tree.html"
+step_output "agent lifecycle logged" 'data-event="agent_spawned"' \
+    grep -o 'data-event="agent_spawned"' "$TMP/context/ledger.html"
+python3 "$TMP/context/scripts/record-agent.py" --agent-id worker-1 --status active --details heartbeat >/tmp/agent-active.json
+step_json_file "record-agent active avoids ledger" /tmp/agent-active.json "data['status'] == 'recorded' and data['ledger_appended'] is False"
 
 mkdir -p "$TMP/context/sub"
 cat > "$TMP/context/sub/nested.html" <<'HTMLEOF'
@@ -220,17 +237,23 @@ python3 "$TMP/context/scripts/check-reachability.py" --json > /tmp/reachability-
 step_json_file "reachability reports orphan handoff" /tmp/reachability-orphan.json "'context/orphan.html' in data['orphans'] and data['handoff_request']['type'] == 'context_hygiene_request'"
 rm -f "$TMP/context/orphan.html"
 
-python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --add src/main.py --agent-id smoke-agent >/tmp/update-tracks.json
+step_output "worker update-tracks denied" '"status": "permission_denied"' \
+    python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --add src/main.py --agent-id smoke-agent
+
+python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --add src/main.py --agent-id orchestrator >/tmp/update-tracks.json
 step_output "update-tracks logs event" 'data-event="track_update"' \
     grep -o 'data-event="track_update"' "$TMP/context/ledger.html"
+
+step_output "update-tracks source log appended" '"event":"track_update"' \
+    grep -o '"event":"track_update"' "$TMP/context/ledger-events.ndjson"
 
 python3 "$TMP/context/scripts/route-diff.py" --files src/main.py > /tmp/route-diff.json
 step_json_file "route-diff maps changed file" /tmp/route-diff.json "any(p['page'] == 'decisions.html' for p in data['matched_pages'])"
 
-python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --add src/missing.py --agent-id smoke-agent >/dev/null
+python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --add src/missing.py --agent-id orchestrator >/dev/null
 python3 "$TMP/context/scripts/route-diff.py" --files src/other.py > /tmp/route-stale.json
 step_json_file "route-diff reports stale track" /tmp/route-stale.json "any(item['page'] == 'decisions.html' for item in data['stale_tracks'])"
-python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --remove src/missing.py --agent-id smoke-agent >/dev/null
+python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --remove src/missing.py --agent-id orchestrator >/dev/null
 
 python3 - <<'PY'
 from pathlib import Path

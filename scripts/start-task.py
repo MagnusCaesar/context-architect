@@ -13,10 +13,13 @@ from pathlib import Path
 
 from context_utils import (
     add_active_lock,
+    agent_role,
     append_ledger_event,
     find_context_root,
+    has_permission,
     match_tracks,
     parse_tracks,
+    permission_denied,
     read_config,
     read_meta,
     remove_active_lock,
@@ -132,6 +135,15 @@ def acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
         stale_after = int(config.get("staleLockMinutes", 30))
         age = lock_age_minutes(locked_at)
         if age is not None and age > stale_after:
+            if not has_permission(context_root, agent_id, "break_stale_lock"):
+                result = {
+                    "status": "blocked_active_lock",
+                    "acquired": False,
+                    "reason": f"stale lock held by {locked_by}; break requires orchestrator",
+                    "action": "orchestrator_resolution_required",
+                }
+                append_ledger_event(context_root, "acquire", page, agent_id, result["status"], result["reason"])
+                return result
             update_lock_meta(context_root, page_path, agent_id)
             remove_active_lock(context_root, page, locked_by)
             add_active_lock(context_root, page, agent_id)
@@ -186,6 +198,11 @@ def main():
 
     if not args.page:
         print(json.dumps({"error": "--page required for write tasks"}))
+        sys.exit(1)
+
+    if not has_permission(context_root, args.agent_id, "acquire_lock"):
+        result = permission_denied(args.agent_id, "acquire_lock", agent_role(context_root, args.agent_id))
+        print(json.dumps(result, indent=2))
         sys.exit(1)
 
     task_class = classify_task(args.lines, args.files)

@@ -1,6 +1,10 @@
 ---
 name: context-architecture
 description: Bootstrap and operate a map-first local context wiki for agent work. Deterministic scripts own all routine (locks, ledgers, validation, rendering). LLMs own only judgment calls (significance, routing, rationale).
+context_architecture:
+  contract_version: 1
+  default_role: worker
+  permission_profiles: templates/permission-profiles.json
 ---
 
 Use when:
@@ -68,6 +72,18 @@ python context/scripts/daily-hygiene.py --json
 ```
 Reachability checks whether live context pages are discoverable from the project bootloader/head page. Daily hygiene is normally hidden: the first non-hygiene ledger event each day runs it automatically and records a `daily_hygiene` event.
 
+### Ledger Hardening
+```bash
+context/scripts/harden-ledger.sh context
+```
+Optional Linux hardening for `context/ledger-events.ndjson`. The NDJSON file is the append-only event source; `ledger.html` is only a bounded generated view.
+
+### Agent Coordination
+```bash
+python context/scripts/record-agent.py --agent-id worker-1 --parent-id orchestrator --role verifier --task "validate parser" --page parser.html --status spawned --actor-id orchestrator
+```
+Updates advisory `agent-tree.html`. Use it before asking the orchestrator to release or arbitrate another agent's work. It is not lock authority.
+
 ### Task Close
 ```bash
 python context/scripts/close-task.py --page <page> --summary "<what changed>"
@@ -98,8 +114,10 @@ Exercises full lifecycle and contract failures: bootstrap → lock contention �
 ```
 context/
 ├── index.html              # Map-first retrieval router
-├── control-plane.html      # Runtime checklist (read by scripts, not agents)
-├── ledger.html             # Active locks + history
+├── control-plane.html      # Runtime checklist
+├── ledger-events.ndjson    # Append-only event source
+├── ledger.html             # Active locks + rendered event view
+├── agent-tree.html         # Advisory active agent subtree
 ├── decisions.html          # Decision graph
 ├── config.json             # Repo roots, settings, validator config
 ├── scripts/                # Deterministic tools (copied from skill)
@@ -112,6 +130,8 @@ context/
 │   ├── update-tracks.py
 │   ├── check-reachability.py
 │   ├── daily-hygiene.py
+│   ├── harden-ledger.sh
+│   ├── record-agent.py
 │   └── context_utils.py
 ├── docs/                   # Auto-generated markdown (for humans)
 └── [project pages].html    # Domain-specific knowledge pages
@@ -123,7 +143,9 @@ context/
 - Markdown auto-generated for human consumption
 - Max 200 lines per page
 - Discovery blocks via `<meta name="read-when">`, `<meta name="update-when">`, and page-local `<meta name="tracks">`
-- Ledger events are audit history; wiki/decision pages hold durable knowledge
+- `ledger-events.ndjson` is append-only audit; `ledger.html` is a bounded view; wiki/decision pages hold durable knowledge
+- `agent-tree.html` is advisory coordination; locks remain page metas plus ledger active locks
+- Permission profiles are declared in skill frontmatter, seeded into config, and enforced by scripts
 - New page only when no existing page owns topic, knowledge is durable, and a future read trigger exists
 - Decisions form a graph (`data-builds-on`, required rationale fields, optional `data-tracks`)
 - Lock arbitration: subagents self-manage, orchestrator arbitrates contention

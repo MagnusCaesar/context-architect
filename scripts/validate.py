@@ -2,13 +2,14 @@
 """Validate all context/ invariants."""
 
 import argparse
+import html
 import json
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from context_utils import check_reachability, find_context_root, read_config, read_meta, tracks_status
+from context_utils import check_reachability, find_context_root, ledger_render_limit, read_config, read_meta, tracks_status
 
 
 def html_files(context_root: Path):
@@ -174,9 +175,33 @@ def check_reviewed_at(context_root: Path):
 
 def check_ledger_events(context_root: Path):
     failures = []
+    event_log = context_root / "ledger-events.ndjson"
+    records = []
+    required = ["time", "event", "page", "agent", "status", "details"]
+    if not event_log.exists():
+        failures.append("ledger-events.ndjson: missing append-only event log")
+    else:
+        for idx, line in enumerate(event_log.read_text(errors="replace").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as e:
+                failures.append(f"ledger-events.ndjson:{idx}: invalid JSON: {e}")
+                continue
+            if not isinstance(record, dict):
+                failures.append(f"ledger-events.ndjson:{idx}: event must be an object")
+                continue
+            for key in required:
+                if key not in record:
+                    failures.append(f"ledger-events.ndjson:{idx}: missing {key}")
+            if "extra_attrs" in record and not isinstance(record["extra_attrs"], dict):
+                failures.append(f"ledger-events.ndjson:{idx}: extra_attrs must be an object")
+            records.append(record)
+
     ledger_path = context_root / "ledger.html"
     if not ledger_path.exists():
-        return []
+        return failures
     content = ledger_path.read_text(errors="replace")
     if '<section id="events">' not in content:
         failures.append("ledger.html: missing <section id=\"events\">")
@@ -185,7 +210,14 @@ def check_ledger_events(context_root: Path):
     if not match:
         failures.append("ledger.html: events section missing table body")
         return failures
-    for row in re.findall(r'<tr\b([^>]*)>(.*?)</tr>', match.group(1), flags=re.S):
+    rows = re.findall(r'<tr\b([^>]*)>(.*?)</tr>', match.group(1), flags=re.S)
+    limit = ledger_render_limit(context_root)
+    rendered_records = records[-limit:] if limit > 0 else records
+    if len(rows) != len(rendered_records):
+        failures.append(
+            f"ledger.html: rendered event rows {len(rows)} do not match ledger-events.ndjson window {len(rendered_records)}"
+        )
+    for index, row in enumerate(rows):
         attrs, body = row
         for key in ["time", "event", "page", "agent", "status"]:
             if f"data-{key}=" not in attrs:
@@ -193,6 +225,15 @@ def check_ledger_events(context_root: Path):
         cells = re.findall(r'<td>.*?</td>', body, flags=re.S)
         if len(cells) != 6:
             failures.append("ledger.html: event row must have 6 cells")
+        if index < len(rendered_records):
+            parsed_attrs = {
+                key: html.unescape(value)
+                for key, value in re.findall(r'data-([A-Za-z0-9_-]+)="([^"]*)"', attrs)
+            }
+            record = rendered_records[index]
+            for key in ["time", "event", "page", "agent", "status"]:
+                if parsed_attrs.get(key) != str(record.get(key, "")):
+                    failures.append(f"ledger.html: event row {index + 1} data-{key} does not match ledger-events.ndjson")
     return failures
 
 
@@ -208,6 +249,62 @@ def check_config(context_root: Path):
     ignore_tracks = config.get("ignoreTracks", [])
     if not isinstance(ignore_tracks, list) or not all(isinstance(item, str) for item in ignore_tracks):
         failures.append("config.json: ignoreTracks must be a list of strings")
+    ledger_limit = config.get("ledgerRenderLimit", 75)
+    if not isinstance(ledger_limit, int) or ledger_limit < 0:
+        failures.append("config.json: ledgerRenderLimit must be a non-negative integer")
+    profiles = config.get("permissionProfiles", {})
+    required = {"acquire_lock", "release_lock", "break_stale_lock", "force_release_lock", "update_tracks", "record_any_agent"}
+    if not isinstance(profiles, dict):
+        failures.append("config.json: permissionProfiles must be an object")
+    else:
+        for role in ("orchestrator", "worker", "readonly"):
+            profile = profiles.get(role)
+            if not isinstance(profile, dict):
+                failures.append(f"config.json: permissionProfiles.{role} must be an object")
+                continue
+            missing = sorted(required - set(profile))
+            if missing:
+                failures.append(f"config.json: permissionProfiles.{role} missing {', '.join(missing)}")
+    agent_roles = config.get("agentRoles", {})
+    if not isinstance(agent_roles, dict):
+        failures.append("config.json: agentRoles must be an object")
+    return failures
+
+
+def check_agent_tree(context_root: Path):
+    failures = []
+    path = context_root / "agent-tree.html"
+    if not path.exists():
+        return failures
+    content = path.read_text(errors="replace")
+    if '<section id="tree">' not in content:
+        failures.append("agent-tree.html: missing <section id=\"tree\">")
+    match = re.search(r'<section id="agent-rows">.*?<tbody>(.*?)</tbody>', content, flags=re.S)
+    if not match:
+        failures.append("agent-tree.html: agent rows section missing table body")
+        return failures
+    seen = set()
+    statuses = {"spawned", "active", "blocked", "handoff", "closed"}
+    for attrs, body in re.findall(r'<tr\b([^>]*)>(.*?)</tr>', match.group(1), flags=re.S):
+        parsed = {
+            key: html.unescape(value)
+            for key, value in re.findall(r'data-([A-Za-z0-9_-]+)="([^"]*)"', attrs)
+        }
+        for key in ["time", "agent", "parent", "role", "task", "page", "status", "details"]:
+            if key not in parsed:
+                failures.append(f"agent-tree.html: agent row missing data-{key}")
+        agent = parsed.get("agent", "")
+        if agent in seen:
+            failures.append(f"agent-tree.html: duplicate agent row {agent}")
+        if agent:
+            seen.add(agent)
+        if parsed.get("parent") and parsed.get("parent") == agent:
+            failures.append(f"agent-tree.html: agent {agent} cannot be its own parent")
+        if parsed.get("status") and parsed["status"] not in statuses:
+            failures.append(f"agent-tree.html: invalid status {parsed['status']}")
+        cells = re.findall(r'<td>.*?</td>', body, flags=re.S)
+        if len(cells) != 8:
+            failures.append("agent-tree.html: agent row must have 8 cells")
     return failures
 
 
@@ -231,6 +328,7 @@ def main():
         "decision_graph": check_decision_graph(context_root),
         "ledger_consistency": check_ledger_consistency(context_root),
         "ledger_events": check_ledger_events(context_root),
+        "agent_tree": check_agent_tree(context_root),
         "tracks": check_tracks(context_root),
         "reviewed_at": check_reviewed_at(context_root),
         "config": check_config(context_root),

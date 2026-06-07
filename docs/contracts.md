@@ -13,6 +13,8 @@ justified.
 - `route-diff.py`: top-level `matched_pages`, `unmatched_files`, `stale_tracks`
 - `check-reachability.py`: `ok`, `warning`, `orphans_found`
 - `daily-hygiene.py`: `ok`, `warning`, `critical`, `skipped`
+- `record-agent.py`: `recorded`, `permission_denied`
+- mutating scripts may return `permission_denied`
 
 Existing JSON fields should be preserved where practical. New callers should use
 the stable `status` field.
@@ -44,22 +46,38 @@ successful task close:
 
 ## Ledger Events
 
-`ledger.html` keeps the current active-lock table and also contains:
+`ledger-events.ndjson` is the append-only event source of truth. Each line is
+one JSON object with:
+
+`time`, `event`, `page`, `agent`, `status`, `details`
+
+Optional event attributes live under `extra_attrs`.
+
+`ledger.html` keeps the current active-lock table and renders a bounded recent
+window from `ledger-events.ndjson`:
 
 ```html
 <section id="events">
 ```
 
-Event rows are structured HTML. Visible columns are:
+Rendered event rows are structured HTML. Visible columns are:
 
 `time`, `event`, `page`, `agent`, `status`, `details`
 
 Rows also carry matching `data-*` attributes so validators can parse them
 deterministically.
 
+`ledgerRenderLimit` in `config.json` bounds rendered rows in `ledger.html` so
+the context page does not grow without limit. The NDJSON log may keep full audit
+history.
+
 The first non-`daily_hygiene` ledger event of a local day silently runs daily
 hygiene before appending the requested event. Hygiene appends exactly one
 `daily_hygiene` event per day. It does not delete, archive, or spawn agents.
+
+`harden-ledger.sh` may set `chattr +a` on `ledger-events.ndjson` when Linux and
+the filesystem support it. This is optional hardening; scripts must still work
+without it.
 
 ## Reachability
 
@@ -80,6 +98,44 @@ internal HTML links. `tracks`, ledger events, and decision refs are not
 reachability edges.
 
 Broken internal links are critical. Orphans and fallback roots are warnings.
+
+## Agent Tree
+
+`agent-tree.html` is advisory coordination, not lock authority. It helps agents
+see active subagent work before escalating to the orchestrator. Lock authority
+remains page lock metas plus the ledger active-lock table.
+
+`record-agent.py` upserts one row per `agent-id` and renders a tree from
+`parent-id`. Inputs:
+
+`agent-id`, `parent-id`, `role`, `task`, `page`, `status`, `details`
+
+Statuses:
+
+- `spawned`
+- `active`
+- `blocked`
+- `handoff`
+- `closed`
+
+Lifecycle statuses `spawned`, `blocked`, `handoff`, and `closed` also append a
+ledger event. `active` refreshes update only `agent-tree.html`.
+
+## Permissions
+
+`SKILL.md` declares the permission profile template in frontmatter.
+`bootstrap.py` seeds those defaults into `context/config.json`. Scripts enforce
+`config.json`; the skill file itself is only declaration.
+
+Default roles:
+
+- `orchestrator`: acquire/release locks, break stale locks, force release,
+  update tracks, record any agent.
+- `worker`: acquire free locks, release own locks, record itself.
+- `readonly`: run read-only checks only.
+
+Unknown agents default to `worker`. `agentRoles` in `config.json` maps explicit
+agent IDs to roles.
 
 ## Decision Graph
 

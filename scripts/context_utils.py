@@ -16,6 +16,32 @@ from pathlib import Path
 
 CONTEXT_ONLY = "context-only"
 _HYGIENE_RUNNING = False
+DEFAULT_PERMISSION_PROFILES = {
+    "orchestrator": {
+        "acquire_lock": True,
+        "release_lock": True,
+        "break_stale_lock": True,
+        "force_release_lock": True,
+        "update_tracks": True,
+        "record_any_agent": True,
+    },
+    "worker": {
+        "acquire_lock": True,
+        "release_lock": True,
+        "break_stale_lock": False,
+        "force_release_lock": False,
+        "update_tracks": False,
+        "record_any_agent": False,
+    },
+    "readonly": {
+        "acquire_lock": False,
+        "release_lock": False,
+        "break_stale_lock": False,
+        "force_release_lock": False,
+        "update_tracks": False,
+        "record_any_agent": False,
+    },
+}
 
 
 def now_utc() -> str:
@@ -44,6 +70,44 @@ def read_config(context_root: Path) -> dict:
         return json.loads(path.read_text(errors="replace"))
     except json.JSONDecodeError:
         return {}
+
+
+def permission_profiles(context_root: Path) -> dict:
+    config = read_config(context_root)
+    profiles = config.get("permissionProfiles")
+    if isinstance(profiles, dict):
+        merged = {name: dict(values) for name, values in DEFAULT_PERMISSION_PROFILES.items()}
+        for name, values in profiles.items():
+            if isinstance(values, dict):
+                merged[str(name)] = {**merged.get(str(name), {}), **values}
+        return merged
+    return DEFAULT_PERMISSION_PROFILES
+
+
+def agent_role(context_root: Path, agent_id: str) -> str:
+    config = read_config(context_root)
+    roles = config.get("agentRoles", {})
+    if isinstance(roles, dict) and agent_id in roles:
+        return str(roles[agent_id])
+    return str(config.get("defaultRole", "worker"))
+
+
+def has_permission(context_root: Path, agent_id: str, capability: str) -> bool:
+    role = agent_role(context_root, agent_id)
+    profile = permission_profiles(context_root).get(role, {})
+    return bool(profile.get(capability, False))
+
+
+def permission_denied(agent_id: str, capability: str, role: str) -> dict:
+    return {
+        "status": "permission_denied",
+        "allowed": False,
+        "agent": agent_id,
+        "role": role,
+        "capability": capability,
+        "reason": f"{role} cannot {capability}",
+        "action": "orchestrator_resolution_required",
+    }
 
 
 def repo_root(context_root: Path) -> Path:
@@ -186,6 +250,79 @@ def ensure_ledger_events_section(content: str) -> str:
     return content + section
 
 
+def ledger_events_path(context_root: Path) -> Path:
+    return context_root / "ledger-events.ndjson"
+
+
+def ledger_render_limit(context_root: Path) -> int:
+    try:
+        return int(read_config(context_root).get("ledgerRenderLimit", 75))
+    except (TypeError, ValueError):
+        return 75
+
+
+def read_ledger_events(context_root: Path) -> list[dict]:
+    path = ledger_events_path(context_root)
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+    return events
+
+
+def append_ledger_event_record(context_root: Path, record: dict) -> None:
+    path = ledger_events_path(context_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def ledger_event_row(record: dict) -> str:
+    base = {
+        "time": str(record.get("time", "")),
+        "event": str(record.get("event", "")),
+        "page": str(record.get("page", "")),
+        "agent": str(record.get("agent", "")),
+        "status": str(record.get("status", "")),
+    }
+    extra = record.get("extra_attrs") if isinstance(record.get("extra_attrs"), dict) else {}
+    attrs = {**base, **{str(k): str(v) for k, v in extra.items()}}
+    attr_text = " ".join(f'data-{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items())
+    cells = "".join(
+        f"<td>{html.escape(str(value))}</td>"
+        for value in [base["time"], base["event"], base["page"], base["agent"], base["status"], record.get("details", "")]
+    )
+    return f"          <tr {attr_text}>{cells}</tr>\n"
+
+
+def render_ledger_events(context_root: Path) -> None:
+    ledger = context_root / "ledger.html"
+    if not ledger.exists():
+        return
+    content = ensure_ledger_events_section(ledger.read_text(errors="replace"))
+    limit = ledger_render_limit(context_root)
+    events = read_ledger_events(context_root)
+    if limit > 0:
+        events = events[-limit:]
+    rows = "".join(ledger_event_row(record) for record in events)
+    pattern = r'(<section id="events">.*?<tbody>\n)(.*?)(\s*</tbody>)'
+    new_content, count = re.subn(pattern, rf"\1{rows}\3", content, count=1, flags=re.S)
+    if count == 0:
+        new_content = content.replace("</tbody>", rows + "        </tbody>", 1)
+    if new_content != content:
+        write_atomic(ledger, new_content, context_root=context_root)
+
+
 def append_ledger_event(
     context_root: Path,
     event: str,
@@ -201,31 +338,28 @@ def append_ledger_event(
         return
     if trigger_hygiene and event != "daily_hygiene":
         maybe_run_daily_hygiene(context_root)
-    content = ensure_ledger_events_section(ledger.read_text(errors="replace"))
     timestamp = now_utc()
-    attrs = {
+    record = {
         "time": timestamp,
         "event": event,
         "page": page,
         "agent": agent,
         "status": status,
+        "details": details,
     }
     if extra_attrs:
-        attrs.update(extra_attrs)
-    attr_text = " ".join(f'data-{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items())
-    cells = "".join(
-        f"<td>{html.escape(value)}</td>"
-        for value in [timestamp, event, page, agent, status, details]
-    )
-    row = f"          <tr {attr_text}>{cells}</tr>\n"
-    pattern = r'(<section id="events">.*?<tbody>\n)(.*?)(\s*</tbody>)'
-    new_content, count = re.subn(pattern, rf"\1\2{row}\3", content, count=1, flags=re.S)
-    if count == 0:
-        new_content = content.replace("</tbody>", row + "        </tbody>", 1)
-    write_atomic(ledger, new_content, context_root=context_root)
+        record["extra_attrs"] = {str(k): str(v) for k, v in extra_attrs.items()}
+    append_ledger_event_record(context_root, record)
+    render_ledger_events(context_root)
 
 
 def latest_ledger_event(context_root: Path, page: str = "") -> str:
+    for record in reversed(read_ledger_events(context_root)):
+        if page and str(record.get("page", "")) != page:
+            continue
+        event = str(record.get("event", ""))
+        if event:
+            return f"{record.get('time', '?')} {event} {record.get('status', '')}".strip()
     ledger = context_root / "ledger.html"
     if not ledger.exists():
         return ""
@@ -358,7 +492,7 @@ def _bootloader_edges(context_root: Path, root_file: Path) -> tuple[set[str], li
 
 
 def _html_edges(context_root: Path, page: Path) -> tuple[set[str], list[dict]]:
-    if page.name == "ledger.html":
+    if page.name in ("ledger.html", "agent-tree.html"):
         return set(), []
     content = page.read_text(errors="replace")
     edges: set[str] = set()
@@ -457,10 +591,22 @@ def check_reachability(context_root: Path) -> dict:
 
 
 def daily_hygiene_ran_today(context_root: Path) -> bool:
+    today = datetime.now().date()
+    for record in read_ledger_events(context_root):
+        if record.get("event") != "daily_hygiene":
+            continue
+        raw_time = str(record.get("time", ""))
+        try:
+            event_time = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            if event_time.astimezone().date() == today:
+                return True
+        except ValueError:
+            if raw_time.startswith(today.isoformat()):
+                return True
+
     ledger = context_root / "ledger.html"
     if not ledger.exists():
         return False
-    today = datetime.now().date()
     content = ledger.read_text(errors="replace")
     for attrs, _body in re.findall(r'<tr\b([^>]*)>(.*?)</tr>', content, flags=re.S):
         if 'data-event="daily_hygiene"' in attrs:
