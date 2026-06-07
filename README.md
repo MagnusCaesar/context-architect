@@ -23,6 +23,27 @@ Large agent sessions drift when every agent rereads raw files, guesses which not
 
 It is not a semantic graph database and does not replace context-mode, Graphify, grep, or source reading. It is the enforceable control layer around local project memory.
 
+## Strongly Recommended: context-mode
+
+Use context-mode with this framework. This project keeps repo-local context state
+deterministic; context-mode keeps large tool output, file analysis, web fetches,
+and indexed search from flooding the model context window.
+
+Install context-mode from its upstream repository:
+
+https://github.com/mksglu/context-mode
+
+Boundary:
+
+- context-mode handles low-context tool execution, indexed retrieval, web/doc
+  fetch indexing, and session-memory search.
+- context-architect handles page-local `tracks`, diff-to-page routing, locks,
+  ledger events, agent tree, decisions, reachability/orphan checks, permissions,
+  and generated `context/` structure.
+
+Treat them as complementary. Do not replace deterministic framework scripts with
+semantic search results.
+
 ## Install As A Codex Skill
 
 Normal GitHub install:

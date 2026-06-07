@@ -182,3 +182,16 @@ trigger.
 
 Scripts detect facts. The orchestrator proposes context changes. The user or an
 authorized agent approves new pages and destructive cleanup.
+
+## Companion Tools
+
+context-mode is strongly recommended for agents working on this framework or on
+repositories bootstrapped by it:
+
+https://github.com/mksglu/context-mode
+
+It handles low-context tool execution, file analysis, indexed retrieval, web/doc
+fetch indexing, and session-memory search. It is not contract authority.
+Scripts in this repository remain authoritative for `tracks`, routing, locks,
+ledger events, agent tree, decisions, reachability/orphan checks, permissions,
+and generated `context/` structure.

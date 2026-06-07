@@ -47,13 +47,18 @@ Optimize for:
 
 ## Codex Context Discipline
 
+Strongly prefer context-mode when developing this repo. Install and configure it
+from upstream: https://github.com/mksglu/context-mode
+
 Use context-mode tools for analysis-heavy work:
 
 - use `ctx_batch_execute` for multi-file inventory and indexed searching
 - use `ctx_execute_file` to summarize/analyze a file without loading full bytes
 - use direct file reads only when exact text is needed for editing
 
-Keep outputs bounded. Program analysis instead of manually reading large raw outputs.
+Keep outputs bounded. Program analysis instead of manually reading large raw
+outputs. context-mode is a companion retrieval/execution layer, not a substitute
+for this framework's deterministic scripts or contracts.
 
 ## Validation
 

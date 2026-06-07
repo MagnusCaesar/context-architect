@@ -34,9 +34,16 @@ The framework should reduce agent context usage and make routine coordination en
 
 ## Claude Code Notes
 
+Strongly prefer context-mode when developing this repo. Install and configure it
+from upstream: https://github.com/mksglu/context-mode
+
 Hooks under `hooks/` are optional helpers for target repos. Treat them as untrusted until tested against the actual Claude Code hook invocation shape.
 
-If maintaining this repository from Claude Code, use the framework's scripts directly and keep outputs concise. Do not paste large generated reports into chat. Summarize with file paths and validation results.
+If maintaining this repository from Claude Code, use the framework's scripts
+directly and keep outputs concise. Do not paste large generated reports into
+chat. Summarize with file paths and validation results. context-mode is a
+companion retrieval/execution layer, not a substitute for deterministic
+framework scripts or contracts.
 
 ## Validation
 
