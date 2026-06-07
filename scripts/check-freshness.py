@@ -11,6 +11,7 @@ from context_utils import (
     find_context_root,
     read_config,
     read_meta,
+    resolve_context_page,
     repo_root,
     stale_tracks,
     tracks_status,
@@ -22,7 +23,11 @@ def review_time(page_path: Path) -> str:
 
 
 def check_freshness_single(context_root: Path, page: str, root: Path, ignore_patterns: list[str]) -> dict:
-    page_path = context_root / page
+    try:
+        page_path = resolve_context_page(context_root, page)
+        page = page_path.relative_to(context_root).as_posix()
+    except ValueError as e:
+        return {"page": page, "exists": False, "status": "error", "reason": str(e)}
     if not page_path.exists():
         return {"page": page, "exists": False, "status": "untracked", "reason": "page does not exist"}
 
@@ -49,6 +54,7 @@ def check_freshness_single(context_root: Path, page: str, root: Path, ignore_pat
 
     total = 0
     touched = []
+    git_errors = []
     for track in tracking["tracks"]:
         try:
             result = subprocess.run(
@@ -58,12 +64,31 @@ def check_freshness_single(context_root: Path, page: str, root: Path, ignore_pat
                 cwd=str(root),
                 timeout=5,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        except subprocess.TimeoutExpired:
+            git_errors.append({"track": track, "error": "git log timed out"})
+            continue
+        except (FileNotFoundError, OSError) as e:
+            git_errors.append({"track": track, "error": str(e)})
+            continue
+        if result.returncode != 0:
+            git_errors.append({"track": track, "error": result.stderr.strip() or f"git exited {result.returncode}"})
             continue
         if result.returncode == 0 and result.stdout.strip():
             commits = len(result.stdout.strip().splitlines())
             total += commits
             touched.append({"track": track, "commits": commits})
+
+    if git_errors:
+        return {
+            "page": page,
+            "exists": True,
+            "status": "unknown",
+            "stale": None,
+            "reviewed_at": reviewed,
+            "tracks": tracking["tracks"],
+            "git_errors": git_errors,
+            "stale_tracks": missing_tracks,
+        }
 
     stale = bool(total or missing_tracks)
     return {
@@ -87,7 +112,7 @@ def main():
 
     context_root = find_context_root()
     if not context_root:
-        print("ERROR: No context/ directory found")
+        print(json.dumps({"status": "error", "error": "No context/ directory found"}))
         sys.exit(1)
 
     config = read_config(context_root)
@@ -95,7 +120,7 @@ def main():
     ignore_patterns = config.get("ignoreTracks", [])
 
     pages = [args.page] if args.page else sorted(
-        f.name for f in context_root.glob("*.html") if f.name != "index.html"
+        f.relative_to(context_root).as_posix() for f in context_root.rglob("*.html") if f.name != "index.html" and "archived" not in f.parts and "docs" not in f.parts
     )
     results = [check_freshness_single(context_root, page, root, ignore_patterns) for page in pages]
 
@@ -103,11 +128,11 @@ def main():
         print(json.dumps(results, indent=2))
         return
 
-    grouped = {"stale": [], "fresh": [], "untracked": []}
+    grouped = {"stale": [], "fresh": [], "untracked": [], "unknown": [], "error": []}
     for item in results:
         grouped.setdefault(item.get("status", "untracked"), []).append(item)
 
-    for status in ["stale", "untracked", "fresh"]:
+    for status in ["stale", "unknown", "error", "untracked", "fresh"]:
         entries = grouped.get(status, [])
         if not entries:
             continue

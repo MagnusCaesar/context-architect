@@ -7,9 +7,9 @@ a complete context/ skeleton with index, ledger, decisions page,
 config, and scripts.
 
 Usage:
-    python ~/.claude/skills/context-architecture/scripts/bootstrap.py --target /path/to/project
-    python ~/.claude/skills/context-architecture/scripts/bootstrap.py --target . --scan
-    python ~/.claude/skills/context-architecture/scripts/bootstrap.py --target . --config config.json
+    python <skill_dir>/scripts/bootstrap.py --target /path/to/project
+    python <skill_dir>/scripts/bootstrap.py --target . --scan
+    python <skill_dir>/scripts/bootstrap.py --target . --config config.json
 
 Modes:
     --scan      Scan repo and print findings (no file creation)
@@ -18,6 +18,8 @@ Modes:
 """
 
 import argparse
+import hashlib
+import html
 import json
 import os
 import re
@@ -27,7 +29,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from context_utils import write_atomic
+from context_utils import resolve_context_page, today_utc, write_atomic
 
 
 SKILL_ROOT = Path(__file__).parent.parent
@@ -116,10 +118,7 @@ def scan_repo(target: Path) -> dict:
             findings["test_files"].append(rel_path)
 
         # Doc files
-        if item.suffix in (".md", ".rst", ".txt") and item.name.upper() == item.name.replace(".", "."):
-            findings["doc_files"].append(rel_path)
-        elif item.name.lower() in ("readme.md", "readme.rst", "changelog.md",
-                                     "contributing.md", "architecture.md"):
+        if item.suffix.lower() in (".md", ".rst", ".txt") and item.name.lower() not in ("license",):
             findings["doc_files"].append(rel_path)
 
         # Large/important files (>200 lines, not tests)
@@ -142,6 +141,7 @@ def generate_suggested_pages(findings: dict) -> list:
 
     # Always include these structural pages
     pages.append({"name": "index.html", "purpose": "Root entry point and page map", "auto": True})
+    pages.append({"name": "control-plane.html", "purpose": "Runtime workflow checklist", "auto": True})
     pages.append({"name": "ledger.html", "purpose": "Concurrency locks and history", "auto": True})
     pages.append({"name": "agent-tree.html", "purpose": "Advisory agent coordination tree", "auto": True})
     pages.append({"name": "decisions.html", "purpose": "Decision graph and rationale", "auto": True})
@@ -204,32 +204,49 @@ def slugify(value: str) -> str:
     return slug or "imported-doc"
 
 
+def htext(value) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def hattr(value) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def checked_page_name(context_dir: Path, name: str) -> str:
+    return resolve_context_page(context_dir, name).relative_to(context_dir).as_posix()
+
+
 def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> list:
     imported = []
     for candidate in doc_import_candidates(target, findings):
         source = target / candidate["path"]
         text = source.read_text(errors="replace")
         title = next((line.lstrip("#").strip() for line in text.splitlines() if line.startswith("#")), source.stem)
-        name = f"doc-{slugify(title)}.html"
-        body = "\n".join(f"      <p>{line}</p>" for line in text.splitlines() if line and not line.startswith("#"))
+        digest = hashlib.sha1(candidate["path"].encode("utf-8")).hexdigest()[:8]
+        name = checked_page_name(context_dir, f"doc-{slugify(title)}-{digest}.html")
+        title_text = htext(title)
+        title_attr = hattr(title)
+        source_text = htext(candidate["path"])
+        source_attr = hattr(candidate["path"])
+        body = "\n".join(f"      <p>{htext(line)}</p>" for line in text.splitlines() if line and not line.startswith("#"))
         page_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="title" content="{title}">
+  <meta name="title" content="{title_attr}">
   <meta name="created" content="{today}">
   <meta name="updated" content="{today}">
   <meta name="locked" content="false">
   <meta name="locked-by" content="">
   <meta name="locked-at" content="">
-  <meta name="read-when" content="Need imported notes from {candidate['path']}">
-  <meta name="update-when" content="{candidate['path']} changes or imported notes are reviewed">
-  <meta name="tracks" content="{candidate['path']}">
+  <meta name="read-when" content="Need imported notes from {source_attr}">
+  <meta name="update-when" content="{source_attr} changes or imported notes are reviewed">
+  <meta name="tracks" content="{source_attr}">
 </head>
 <body>
   <header>
-    <h1>{title}</h1>
-    <p class="summary">Imported from {candidate['path']}.</p>
+    <h1>{title_text}</h1>
+    <p class="summary">Imported from {source_text}.</p>
   </header>
   <main>
     <section id="overview">
@@ -246,12 +263,16 @@ def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> 
 </html>
 """
         write_atomic(context_dir / name, page_html, context_root=context_dir)
-        archive = context_dir / "archived" / Path(candidate["path"]).name
+        archive = context_dir / "archived" / candidate["path"]
+        archive.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, archive)
         imported.append({"source": candidate["path"], "page": name, "archive": str(archive.relative_to(context_dir))})
     if imported:
         index_path = context_dir / "index.html"
-        links = "\n".join(f'      <li><a href="./{item["page"]}">{item["page"]}</a> — imported from {item["source"]}</li>' for item in imported)
+        links = "\n".join(
+            f'      <li><a href="./{hattr(item["page"])}">{htext(item["page"])}</a> — imported from {htext(item["source"])}</li>'
+            for item in imported
+        )
         index = index_path.read_text(errors="replace").replace("      </ul>", links + "\n      </ul>", 1)
         write_atomic(index_path, index, context_root=context_dir)
     return imported
@@ -263,6 +284,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
     context_dir.mkdir(exist_ok=True)
     (context_dir / "docs").mkdir(exist_ok=True)
     (context_dir / "scripts").mkdir(exist_ok=True)
+    (context_dir / "hooks").mkdir(exist_ok=True)
     (context_dir / "archived").mkdir(exist_ok=True)
 
     # Copy scripts from skill
@@ -274,12 +296,17 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
     runtime_policy = TEMPLATES_DIR / "runtime-policy.md"
     if runtime_policy.exists():
         shutil.copy2(runtime_policy, context_dir / "runtime-policy.md")
+    hooks_src = SKILL_ROOT / "hooks"
+    hooks_dst = context_dir / "hooks"
+    if hooks_src.exists():
+        for hook in hooks_src.glob("*.sh"):
+            shutil.copy2(hook, hooks_dst / hook.name)
 
     # Generate config.json
     config_data = config or {
         "projectName": target.name,
         "maxLinesPerPage": 200,
-        "repoRoots": [{"path": str(target), "label": "main"}],
+        "repoRoots": [{"path": ".", "label": "main"}],
         "staleLockMinutes": 30,
         "ledgerRenderLimit": 75,
         "autoGenerateDocs": True,
@@ -292,18 +319,22 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
     write_atomic(context_dir / "config.json", json.dumps(config_data, indent=2) + "\n", context_root=context_dir)
 
     # Generate index.html
-    today = __import__("datetime").date.today().isoformat()
+    today = today_utc()
+    project_name = config_data.get('projectName', target.name)
+    project_text = htext(project_name)
+    project_attr = hattr(project_name)
     page_links = []
     for page in pages:
         if page["name"] == "index.html":
             continue
-        page_links.append(f'      <li><a href="./{page["name"]}">{page["name"]}</a> — {page["purpose"]}</li>')
+        page_name = checked_page_name(context_dir, page["name"])
+        page_links.append(f'      <li><a href="./{hattr(page_name)}">{htext(page_name)}</a> — {htext(page["purpose"])}</li>')
 
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="title" content="{config_data.get('projectName', target.name)} Context">
+  <meta name="title" content="{project_attr} Context">
   <meta name="created" content="{today}">
   <meta name="updated" content="{today}">
   <meta name="read-when" content="Starting any task in this project">
@@ -311,7 +342,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
 </head>
 <body>
   <header>
-    <h1>{config_data.get('projectName', target.name)} — Context Map</h1>
+    <h1>{project_text} — Context Map</h1>
     <p class="summary">Entry point for all project knowledge. Start here.</p>
   </header>
 
@@ -347,6 +378,54 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
 </html>
 """
     write_atomic(context_dir / "index.html", index_html, context_root=context_dir)
+
+    # Generate control-plane.html
+    control_plane_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="title" content="Control Plane">
+  <meta name="created" content="{today}">
+  <meta name="updated" content="{today}">
+  <meta name="locked" content="false">
+  <meta name="locked-by" content="">
+  <meta name="locked-at" content="">
+  <meta name="read-when" content="Before choosing task class or escalation path">
+  <meta name="update-when" content="Task workflow, permissions, or validation policy changes">
+  <meta name="tracks" content="context-only">
+</head>
+<body>
+  <header>
+    <h1>Control Plane</h1>
+    <p class="summary">Runtime checklist for script-owned context workflow.</p>
+  </header>
+
+  <main>
+    <section id="task-classes">
+      <h2>Task Classes</h2>
+      <ul>
+        <li>Read-only: no locks.</li>
+        <li>Tiny write: acquire page lock, edit narrowly, close task.</li>
+        <li>Standard write: route files, acquire lock, validate, close task.</li>
+      </ul>
+    </section>
+
+    <section id="escalation">
+      <h2>Escalation</h2>
+      <p>Use orchestrator resolution for blocked locks, stale tracks, unmatched files, and orphan context pages.</p>
+    </section>
+  </main>
+
+  <footer>
+    <nav class="see-also">
+      <a href="./index.html">Index</a>
+      <a href="./ledger.html">Lock Ledger</a>
+    </nav>
+  </footer>
+</body>
+</html>
+"""
+    write_atomic(context_dir / "control-plane.html", control_plane_html, context_root=context_dir)
 
     # Generate ledger event log and rendered view.
     write_atomic(context_dir / "ledger-events.ndjson", "", context_root=context_dir)
@@ -519,35 +598,40 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
 
     # Generate stub pages for each suggested domain page
     for page in pages:
-        if page["name"] in ("index.html", "ledger.html", "agent-tree.html", "decisions.html"):
+        if page["name"] in ("index.html", "control-plane.html", "ledger.html", "agent-tree.html", "decisions.html"):
             continue
         if page.get("auto"):
             continue
 
+        page_name = checked_page_name(context_dir, page["name"])
+        purpose_text = htext(page["purpose"])
+        purpose_attr = hattr(page["purpose"])
+        purpose_lower_text = htext(page["purpose"].lower())
+        purpose_lower_attr = hattr(page["purpose"].lower())
         stub_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="title" content="{page['purpose']}">
+  <meta name="title" content="{purpose_attr}">
   <meta name="created" content="{today}">
   <meta name="updated" content="{today}">
   <meta name="locked" content="false">
   <meta name="locked-by" content="">
   <meta name="locked-at" content="">
-  <meta name="read-when" content="Need {page['purpose'].lower()}">
-  <meta name="update-when" content="{page['purpose']} changes">
+  <meta name="read-when" content="Need {purpose_lower_attr}">
+  <meta name="update-when" content="{purpose_attr} changes">
   <meta name="tracks" content="context-only">
 </head>
 <body>
   <header>
-    <h1>{page['purpose']}</h1>
+    <h1>{purpose_text}</h1>
     <p class="summary">TODO: Fill in from source analysis.</p>
   </header>
 
   <main>
     <section id="overview">
       <h2>Overview</h2>
-      <p>This page documents: {page['purpose'].lower()}.</p>
+      <p>This page documents: {purpose_lower_text}.</p>
     </section>
   </main>
 
@@ -559,7 +643,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
 </body>
 </html>
 """
-        page_path = context_dir / page["name"]
+        page_path = context_dir / page_name
         if not page_path.exists():
             write_atomic(page_path, stub_html, context_root=context_dir)
 
@@ -611,11 +695,16 @@ def main():
         pages = generate_suggested_pages(findings)
 
     # Generate
-    context_dir = generate_skeleton(target, pages, config)
-    imported = absorb_docs(target, context_dir, findings, __import__("datetime").date.today().isoformat()) if args.absorb_docs else []
+    try:
+        context_dir = generate_skeleton(target, pages, config)
+        imported = absorb_docs(target, context_dir, findings, today_utc()) if args.absorb_docs else []
+    except ValueError as e:
+        print(json.dumps({"status": "error", "error": str(e)}))
+        sys.exit(1)
     print(f"Generated context/ at {context_dir}")
     print(f"  - {len(list(context_dir.glob('*.html')))} HTML pages")
     print(f"  - {len(list((context_dir / 'scripts').glob('*.py')))} scripts")
+    print(f"  - {len(list((context_dir / 'hooks').glob('*.sh')))} hooks")
     print(f"  - config.json")
     print(f"  - runtime-policy.md")
     if findings.get("doc_files"):

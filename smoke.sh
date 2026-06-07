@@ -10,7 +10,13 @@ TMP=$(mktemp -d)
 PASS=0
 FAIL=0
 
-cleanup() { rm -rf "$TMP"; }
+cleanup() {
+    python3 - "$TMP" <<'PY'
+import shutil
+import sys
+shutil.rmtree(sys.argv[1], ignore_errors=True)
+PY
+}
 trap cleanup EXIT
 
 step() {
@@ -99,11 +105,31 @@ step_output "bootstrap --scan produces JSON" '"root"' \
 step "bootstrap generates context/" \
     python3 "$SCRIPTS/bootstrap.py" --target "$TMP"
 
+BAD_TMP=$(mktemp -d)
+step_output "bootstrap rejects escaping page names" '"status": "error"' \
+    python3 "$SCRIPTS/bootstrap.py" --target "$BAD_TMP" --pages-json '[{"name":"../evil.html","purpose":"bad"}]'
+python3 - "$BAD_TMP" <<'PY'
+import shutil
+import sys
+shutil.rmtree(sys.argv[1], ignore_errors=True)
+PY
+
 # Switch into temp project (scripts use find_context_root from CWD)
 cd "$TMP"
+python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path("context/config.json")
+data = json.loads(p.read_text())
+roles = data.setdefault("agentRoles", {})
+for agent in ["smoke-agent", "other-agent", "stale-owner", "stale-breaker", "warn-agent", "worker-1"]:
+    roles[agent] = "worker"
+p.write_text(json.dumps(data, indent=2) + "\n")
+PY
 
 # Verify structure
 step "index.html exists" test -f "$TMP/context/index.html"
+step "control-plane.html exists" test -f "$TMP/context/control-plane.html"
 step "ledger.html exists" test -f "$TMP/context/ledger.html"
 step "ledger-events.ndjson exists" test -f "$TMP/context/ledger-events.ndjson"
 step "agent-tree.html exists" test -f "$TMP/context/agent-tree.html"
@@ -111,11 +137,19 @@ step "decisions.html exists" test -f "$TMP/context/decisions.html"
 step "config.json exists" test -f "$TMP/context/config.json"
 step "runtime-policy.md exists" test -f "$TMP/context/runtime-policy.md"
 step "scripts/ populated" test -f "$TMP/context/scripts/validate.py"
+step "hooks/ populated" test -f "$TMP/context/hooks/pre-edit-lock-check.sh"
 step "harden-ledger helper copied" test -f "$TMP/context/scripts/harden-ledger.sh"
 step "check-hardening helper copied" test -f "$TMP/context/scripts/check-hardening.py"
+step_json_file "repo root is portable" "$TMP/context/config.json" "data['repoRoots'][0]['path'] == '.'"
 
 echo ""
 echo "Phase 2: Task lifecycle"
+
+step_output "start-task rejects path traversal" '"status": "error"' \
+    python3 "$TMP/context/scripts/start-task.py" --page ../outside.html --intent "bad path" --agent-id smoke-agent
+
+step_output "unknown agent cannot acquire lock" '"status": "permission_denied"' \
+    python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "unknown" --agent-id unknown-agent
 
 # Start task (acquire lock)
 step_output "start-task acquires lock" '"acquired": true' \
@@ -176,6 +210,36 @@ echo "Phase 3: Utilities"
 # Validate
 step "validate.py passes" \
     python3 "$TMP/context/scripts/validate.py"
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path("context/config.json")
+data = json.loads(p.read_text())
+data["permissionProfiles"]["worker"]["update_tracks"] = "false"
+p.write_text(json.dumps(data, indent=2) + "\n")
+PY
+if python3 "$TMP/context/scripts/validate.py" > "$TMP/permission-invalid.out" 2>&1; then
+    echo "  [FAIL] string permission false fails validation"
+    FAIL=$((FAIL + 1))
+else
+    if grep -q "must be boolean" "$TMP/permission-invalid.out"; then
+        echo "  [PASS] string permission false fails validation"
+        PASS=$((PASS + 1))
+    else
+        echo "  [FAIL] string permission false fails validation"
+        head -5 "$TMP/permission-invalid.out"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path("context/config.json")
+data = json.loads(p.read_text())
+data["permissionProfiles"]["worker"]["update_tracks"] = False
+p.write_text(json.dumps(data, indent=2) + "\n")
+PY
 
 step_output "check-hardening reports status" '"status":' \
     python3 "$TMP/context/scripts/check-hardening.py" --json
@@ -240,7 +304,10 @@ cat > "$TMP/context/orphan.html" <<'HTMLEOF'
 HTMLEOF
 python3 "$TMP/context/scripts/check-reachability.py" --json > /tmp/reachability-orphan.json
 step_json_file "reachability reports orphan handoff" /tmp/reachability-orphan.json "'context/orphan.html' in data['orphans'] and data['handoff_request']['type'] == 'context_hygiene_request'"
-rm -f "$TMP/context/orphan.html"
+python3 - <<'PY'
+from pathlib import Path
+Path("context/orphan.html").unlink(missing_ok=True)
+PY
 
 step_output "worker update-tracks denied" '"status": "permission_denied"' \
     python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --add src/main.py --agent-id smoke-agent
@@ -251,6 +318,9 @@ step_output "update-tracks logs event" 'data-event="track_update"' \
 
 step_output "update-tracks source log appended" '"event":"track_update"' \
     grep -o '"event":"track_update"' "$TMP/context/ledger-events.ndjson"
+
+step_output "update-tracks no-op is unchanged" '"status": "unchanged"' \
+    python3 "$TMP/context/scripts/update-tracks.py" --page decisions.html --add src/main.py --agent-id orchestrator
 
 python3 "$TMP/context/scripts/route-diff.py" --files src/main.py > /tmp/route-diff.json
 step_json_file "route-diff maps changed file" /tmp/route-diff.json "any(p['page'] == 'decisions.html' for p in data['matched_pages'])"
@@ -283,7 +353,10 @@ cat > "$TMP/context/untracked.html" <<'HTMLEOF'
 HTMLEOF
 python3 "$TMP/context/scripts/check-freshness.py" --page untracked.html --json > /tmp/freshness-untracked.json
 step_json_file "freshness reports untracked" /tmp/freshness-untracked.json "data[0]['status'] == 'untracked'"
-rm -f "$TMP/context/untracked.html"
+python3 - <<'PY'
+from pathlib import Path
+Path("context/untracked.html").unlink(missing_ok=True)
+PY
 
 python3 - <<'PY'
 from pathlib import Path
@@ -296,7 +369,10 @@ assert p.read_text() == "new-content"
 assert not list(p.parent.glob(".atomic-test.txt.tmp.*"))
 PY
 step "atomic helper writes without temp leftovers" test -f "$TMP/context/atomic-test.txt"
-rm -f "$TMP/context/atomic-test.txt"
+python3 - <<'PY'
+from pathlib import Path
+Path("context/atomic-test.txt").unlink(missing_ok=True)
+PY
 
 # Generate docs
 step "generate-docs.py runs" \

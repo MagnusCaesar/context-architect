@@ -11,12 +11,14 @@ from pathlib import Path
 from context_utils import (
     agent_role,
     append_ledger_event,
+    context_mutex,
     find_context_root,
     has_permission,
     now_utc,
     permission_denied,
     read_meta,
     remove_active_lock,
+    resolve_context_page,
     set_meta_in_content,
     validation_failure_summary,
     write_atomic,
@@ -24,10 +26,15 @@ from context_utils import (
 
 
 def release_lock(context_root: Path, page: str, agent_id: str) -> dict:
+    with context_mutex(context_root, f"lock-{page}"):
+        return _release_lock(context_root, page, agent_id)
+
+
+def _release_lock(context_root: Path, page: str, agent_id: str) -> dict:
     if not has_permission(context_root, agent_id, "release_lock"):
         return permission_denied(agent_id, "release_lock", agent_role(context_root, agent_id))
 
-    page_path = context_root / page
+    page_path = resolve_context_page(context_root, page)
     if not page_path.exists():
         result = {"status": "release_denied_wrong_owner", "released": False, "reason": f"{page} does not exist"}
         append_ledger_event(context_root, "release", page, agent_id, result["status"], result["reason"])
@@ -133,40 +140,59 @@ def main():
 
     context_root = find_context_root()
     if not context_root:
-        print(json.dumps({"error": "No context/ directory found"}))
+        print(json.dumps({"status": "error", "error": "No context/ directory found"}))
         sys.exit(1)
 
-    lock_result = release_lock(context_root, args.page, args.agent_id)
+    try:
+        page_path = resolve_context_page(context_root, args.page, must_exist=True)
+        page = page_path.relative_to(context_root).as_posix()
+    except (ValueError, FileNotFoundError) as e:
+        print(json.dumps({"status": "error", "error": str(e)}))
+        sys.exit(1)
 
     validate_result = {"ran": False, "reason": "skipped"}
     if not args.skip_validate:
         validate_result = run_validate(context_root)
 
+    if not validate_result.get("passed", True):
+        status = "validation_warning"
+        instruction = "Validation failed. Lock kept so the owner can repair listed failures."
+        append_ledger_event(
+            context_root,
+            "close_validation",
+            page,
+            args.agent_id,
+            status,
+            "; ".join(validate_result.get("failures", [])[:3]),
+        )
+        result = {
+            "status": status,
+            "page": page,
+            "summary": args.summary,
+            "lock_released": {"ran": False, "released": False, "reason": "validation failed"},
+            "validation": validate_result,
+            "docs_generated": {"ran": False, "reason": "validation failed"},
+            "instruction": instruction,
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    lock_result = release_lock(context_root, page, args.agent_id)
+
     docs_result = {"ran": False, "reason": "skipped"}
-    if not args.skip_docs:
+    if lock_result.get("released") and not args.skip_docs:
         docs_result = run_generate_docs(context_root)
 
     if not lock_result.get("released"):
         status = lock_result.get("status", "release_denied_wrong_owner")
         instruction = f"Lock release failed: {lock_result.get('reason')}"
-    elif not validate_result.get("passed", True):
-        status = "validation_warning"
-        instruction = "Task closed but validation failed. Fix listed failures."
-        append_ledger_event(
-            context_root,
-            "close_validation",
-            args.page,
-            args.agent_id,
-            status,
-            "; ".join(validate_result.get("failures", [])[:3]),
-        )
     else:
         status = "released"
         instruction = "Task closed."
 
     result = {
         "status": status,
-        "page": args.page,
+        "page": page,
         "summary": args.summary,
         "lock_released": lock_result,
         "validation": validate_result,

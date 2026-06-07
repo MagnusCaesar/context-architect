@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ DEFAULT_PERMISSION_PROFILES = {
         "force_release_lock": True,
         "update_tracks": True,
         "record_any_agent": True,
+        "record_self": True,
     },
     "worker": {
         "acquire_lock": True,
@@ -32,6 +34,7 @@ DEFAULT_PERMISSION_PROFILES = {
         "force_release_lock": False,
         "update_tracks": False,
         "record_any_agent": False,
+        "record_self": True,
     },
     "readonly": {
         "acquire_lock": False,
@@ -40,6 +43,7 @@ DEFAULT_PERMISSION_PROFILES = {
         "force_release_lock": False,
         "update_tracks": False,
         "record_any_agent": False,
+        "record_self": False,
     },
 }
 
@@ -59,6 +63,9 @@ def find_context_root() -> Path | None:
             return parent / "context"
     if (cwd / "index.html").exists():
         return cwd
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "index.html").exists():
+            return parent
     return None
 
 
@@ -89,13 +96,13 @@ def agent_role(context_root: Path, agent_id: str) -> str:
     roles = config.get("agentRoles", {})
     if isinstance(roles, dict) and agent_id in roles:
         return str(roles[agent_id])
-    return str(config.get("defaultRole", "worker"))
+    return str(config.get("defaultRole", "readonly"))
 
 
 def has_permission(context_root: Path, agent_id: str, capability: str) -> bool:
     role = agent_role(context_root, agent_id)
     profile = permission_profiles(context_root).get(role, {})
-    return bool(profile.get(capability, False))
+    return profile.get(capability) is True
 
 
 def permission_denied(agent_id: str, capability: str, role: str) -> dict:
@@ -114,8 +121,43 @@ def repo_root(context_root: Path) -> Path:
     config = read_config(context_root)
     roots = config.get("repoRoots", [])
     if roots:
-        return Path(roots[0].get("path", str(context_root.parent))).resolve()
+        raw = Path(roots[0].get("path", "."))
+        if not raw.is_absolute():
+            raw = context_root.parent / raw
+        return raw.resolve()
     return context_root.parent.resolve()
+
+
+def resolve_context_page(context_root: Path, page: str, must_exist: bool = False) -> Path:
+    raw = Path(page)
+    if raw.is_absolute() or any(part == ".." for part in raw.parts):
+        raise ValueError(f"invalid context page path: {page}")
+    if raw.suffix != ".html":
+        raise ValueError(f"context page must be .html: {page}")
+    resolved = (context_root / raw).resolve()
+    try:
+        resolved.relative_to(context_root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"context page escapes context root: {page}") from exc
+    if must_exist and not resolved.exists():
+        raise FileNotFoundError(f"{page} does not exist")
+    return resolved
+
+
+@contextmanager
+def context_mutex(context_root: Path, name: str = "context"):
+    lock_dir = context_root / ".locks"
+    lock_dir.mkdir(exist_ok=True)
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+    lock_path = lock_dir / f"{safe_name}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def read_meta(filepath: Path, name: str) -> str:
@@ -128,7 +170,7 @@ def set_meta_in_content(content: str, name: str, value: str) -> str:
     escaped = html.escape(value, quote=True)
     pattern = rf'(<meta\s+name="{re.escape(name)}"\s+content=")[^"]*(")'
     if re.search(pattern, content):
-        return re.sub(pattern, rf'\g<1>{escaped}\2', content, count=1)
+        return re.sub(pattern, lambda m: f"{m.group(1)}{escaped}{m.group(2)}", content, count=1)
     insert = f'  <meta name="{name}" content="{escaped}">\n'
     if "</head>" in content:
         return content.replace("</head>", insert + "</head>", 1)
@@ -316,7 +358,7 @@ def render_ledger_events(context_root: Path) -> None:
         events = events[-limit:]
     rows = "".join(ledger_event_row(record) for record in events)
     pattern = r'(<section id="events">.*?<tbody>\n)(.*?)(\s*</tbody>)'
-    new_content, count = re.subn(pattern, rf"\1{rows}\3", content, count=1, flags=re.S)
+    new_content, count = re.subn(pattern, lambda m: f"{m.group(1)}{rows}{m.group(3)}", content, count=1, flags=re.S)
     if count == 0:
         new_content = content.replace("</tbody>", rows + "        </tbody>", 1)
     if new_content != content:
@@ -388,8 +430,8 @@ def add_active_lock(context_root: Path, page: str, agent: str, purpose: str = "s
         f'          <tr><td>{html.escape(page)}</td><td>{html.escape(agent)}</td>'
         f'<td>{now_utc()}</td><td>{html.escape(purpose)}</td></tr>\n'
     )
-    pattern = r'(<section id="active-locks">.*?<tbody>\n)(.*?)(\s*</tbody>)'
-    new_content, count = re.subn(pattern, rf"\1\2{row}\3", content, count=1, flags=re.S)
+    pattern = r'(<section id="active-locks">.*?<tbody>)(.*?)(\s*</tbody>)'
+    new_content, count = re.subn(pattern, lambda m: f"{m.group(1)}\n{m.group(2)}{row}{m.group(3)}", content, count=1, flags=re.S)
     if count == 0:
         new_content = content.replace("</tbody>", row + "        </tbody>", 1)
     write_atomic(ledger, new_content, context_root=context_root)

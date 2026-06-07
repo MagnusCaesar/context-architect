@@ -1,6 +1,6 @@
 {
   "contractVersion": 1,
-  "defaultRole": "worker",
+  "defaultRole": "readonly",
   "agentRoles": {
     "orchestrator": "orchestrator",
     "system": "orchestrator"
@@ -12,7 +12,8 @@
       "break_stale_lock": true,
       "force_release_lock": true,
       "update_tracks": true,
-      "record_any_agent": true
+      "record_any_agent": true,
+      "record_self": true
     },
     "worker": {
       "acquire_lock": true,
@@ -20,7 +21,8 @@
       "break_stale_lock": false,
       "force_release_lock": false,
       "update_tracks": false,
-      "record_any_agent": false
+      "record_any_agent": false,
+      "record_self": true
     },
     "readonly": {
       "acquire_lock": false,
@@ -28,7 +30,8 @@
       "break_stale_lock": false,
       "force_release_lock": false,
       "update_tracks": false,
-      "record_any_agent": false
+      "record_any_agent": false,
+      "record_self": false
     }
   }
 }

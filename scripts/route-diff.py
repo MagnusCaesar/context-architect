@@ -44,22 +44,25 @@ def route_files(context_root: Path, files: list[str]) -> dict:
     unmatched = set(files)
     untracked_pages = []
 
-    for page_path in sorted(context_root.glob("*.html")):
+    for page_path in sorted(context_root.rglob("*.html")):
+        if "archived" in page_path.parts or "docs" in page_path.parts:
+            continue
         if page_path.name == "index.html":
             continue
+        page_name = page_path.relative_to(context_root).as_posix()
         tracking = tracks_status(page_path)
         if tracking["status"] == "untracked":
-            untracked_pages.append(page_path.name)
+            untracked_pages.append(page_name)
             continue
         if tracking["status"] in ("context-only", "malformed"):
             continue
         page_stale = stale_tracks(tracking["tracks"], root, ignore_patterns)
         if page_stale:
-            stale.append({"page": page_path.name, "tracks": page_stale})
+            stale.append({"page": page_name, "tracks": page_stale})
         matches = match_tracks(files, tracking["tracks"])
         if matches:
             matched_pages.append({
-                "page": page_path.name,
+                "page": page_name,
                 "matched_files": matches,
                 "tracks": tracking["tracks"],
             })
@@ -76,7 +79,7 @@ def route_files(context_root: Path, files: list[str]) -> dict:
             if decision_matches:
                 id_match = re.search(r'id="([^"]+)"', attrs)
                 affected_decisions.append({
-                    "page": page_path.name,
+                    "page": page_name,
                     "decision": id_match.group(1) if id_match else "",
                     "matched_files": decision_matches,
                     "tracks": decision_tracks,
@@ -100,7 +103,7 @@ def main():
 
     context_root = find_context_root()
     if not context_root:
-        print(json.dumps({"error": "No context/ directory found"}))
+        print(json.dumps({"status": "error", "error": "No context/ directory found"}))
         sys.exit(1)
 
     root = repo_root(context_root)
@@ -109,10 +112,10 @@ def main():
         try:
             files.extend(changed_files_from_git(root, args.from_ref, args.to_ref))
         except RuntimeError as e:
-            print(json.dumps({"error": str(e)}))
+            print(json.dumps({"status": "error", "error": str(e)}))
             sys.exit(1)
     if not files:
-        print(json.dumps({"error": "provide --files or --from"}, indent=2))
+        print(json.dumps({"status": "error", "error": "provide --files or --from"}, indent=2))
         sys.exit(1)
     print(json.dumps(route_files(context_root, sorted(set(files))), indent=2))
 

@@ -42,12 +42,14 @@ def check_links(context_root: Path):
 
 def check_lock_meta(context_root: Path):
     failures = []
-    for html_file in sorted(context_root.glob("*.html")):
+    for html_file in html_files(context_root):
         if html_file.name == "index.html":
             continue
         content = html_file.read_text(errors="replace")
         if '<meta name="locked"' not in content:
             failures.append(f"{html_file.name}: missing <meta name=\"locked\">")
+        elif read_meta(html_file, "locked") not in ("true", "false"):
+            failures.append(f"{html_file.name}: locked meta must be true or false")
         if '<meta name="locked-by"' not in content:
             failures.append(f"{html_file.name}: missing <meta name=\"locked-by\">")
         if '<meta name="locked-at"' not in content:
@@ -61,7 +63,7 @@ def check_index_coverage(context_root: Path):
     if not index_path.exists():
         return ["index.html does not exist"]
     index_content = index_path.read_text(errors="replace")
-    for html_file in sorted(context_root.glob("*.html")):
+    for html_file in html_files(context_root):
         if html_file.name == "index.html":
             continue
         if html_file.name not in index_content:
@@ -139,7 +141,7 @@ def check_ledger_consistency(context_root: Path):
         locked_by = read_meta(page_path, "locked-by")
         if locked_by and locked_by != agent:
             failures.append(f"ledger lists {page} owner {agent} but page meta owner is {locked_by}")
-    for page_path in sorted(context_root.glob("*.html")):
+    for page_path in html_files(context_root):
         if page_path.name == "index.html":
             continue
         if read_meta(page_path, "locked") == "true":
@@ -151,7 +153,7 @@ def check_ledger_consistency(context_root: Path):
 
 def check_tracks(context_root: Path):
     failures = []
-    for html_file in sorted(context_root.glob("*.html")):
+    for html_file in html_files(context_root):
         if html_file.name == "index.html":
             continue
         tracking = tracks_status(html_file)
@@ -162,7 +164,7 @@ def check_tracks(context_root: Path):
 
 def check_reviewed_at(context_root: Path):
     failures = []
-    for html_file in sorted(context_root.glob("*.html")):
+    for html_file in html_files(context_root):
         value = read_meta(html_file, "reviewed-at")
         if not value:
             continue
@@ -253,7 +255,7 @@ def check_config(context_root: Path):
     if not isinstance(ledger_limit, int) or ledger_limit < 0:
         failures.append("config.json: ledgerRenderLimit must be a non-negative integer")
     profiles = config.get("permissionProfiles", {})
-    required = {"acquire_lock", "release_lock", "break_stale_lock", "force_release_lock", "update_tracks", "record_any_agent"}
+    required = {"acquire_lock", "release_lock", "break_stale_lock", "force_release_lock", "update_tracks", "record_any_agent", "record_self"}
     if not isinstance(profiles, dict):
         failures.append("config.json: permissionProfiles must be an object")
     else:
@@ -265,6 +267,9 @@ def check_config(context_root: Path):
             missing = sorted(required - set(profile))
             if missing:
                 failures.append(f"config.json: permissionProfiles.{role} missing {', '.join(missing)}")
+            for key in sorted(required & set(profile)):
+                if not isinstance(profile[key], bool):
+                    failures.append(f"config.json: permissionProfiles.{role}.{key} must be boolean")
     agent_roles = config.get("agentRoles", {})
     if not isinstance(agent_roles, dict):
         failures.append("config.json: agentRoles must be an object")
@@ -319,7 +324,8 @@ def main():
         sys.exit(1)
 
     config = read_config(context_root)
-    max_lines = int(config.get("maxLinesPerPage", 200))
+    max_lines_raw = config.get("maxLinesPerPage", 200)
+    max_lines = max_lines_raw if isinstance(max_lines_raw, int) and max_lines_raw > 0 else 200
     checks = {
         "line_counts": check_line_counts(context_root, max_lines),
         "links": check_links(context_root),

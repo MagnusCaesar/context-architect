@@ -11,8 +11,21 @@ if [[ ! -d "$context_dir" ]]; then
   exit 1
 fi
 
-path="$context_dir/ledger-events.ndjson"
+context_real=$(cd "$context_dir" && pwd -P)
+path="$context_real/ledger-events.ndjson"
+if [[ -L "$path" ]]; then
+  printf '{"status":"error","reason":"ledger path is symlink","path":"%s"}\n' "$path"
+  exit 1
+fi
 : >> "$path"
+path_real=$(readlink -f "$path")
+case "$path_real" in
+  "$context_real"/*) ;;
+  *)
+    printf '{"status":"error","reason":"ledger path escapes context","path":"%s"}\n' "$path_real"
+    exit 1
+    ;;
+esac
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   printf '{"status":"unsupported","reason":"not_linux","path":"%s"}\n' "$path"
@@ -24,8 +37,8 @@ if ! command -v chattr >/dev/null 2>&1; then
   exit 0
 fi
 
-if chattr +a "$path" >/dev/null 2>&1; then
-  printf '{"status":"hardened","mode":"append_only","path":"%s"}\n' "$path"
+if chattr +a "$path_real" >/dev/null 2>&1; then
+  printf '{"status":"hardened","mode":"append_only","boundary":"unverified","path":"%s"}\n' "$path_real"
 else
-  printf '{"status":"unsupported","reason":"chattr_failed","path":"%s"}\n' "$path"
+  printf '{"status":"unsupported","reason":"chattr_failed","path":"%s"}\n' "$path_real"
 fi

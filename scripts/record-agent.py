@@ -88,14 +88,14 @@ def render_agent_tree(content: str, records: dict) -> str:
     table_rows = "".join(row_html(records[agent]) for agent in sorted(records))
     content = re.sub(
         r'(<section id="tree">.*?<ul class="agent-tree">\n)(.*?)(\s*</ul>)',
-        rf"\1{tree_rows}\3",
+        lambda m: f"{m.group(1)}{tree_rows}{m.group(3)}",
         content,
         count=1,
         flags=re.S,
     )
     content = re.sub(
         r'(<section id="agent-rows">.*?<tbody>\n)(.*?)(\s*</tbody>)',
-        rf"\1{table_rows}\3",
+        lambda m: f"{m.group(1)}{table_rows}{m.group(3)}",
         content,
         count=1,
         flags=re.S,
@@ -121,8 +121,9 @@ def main():
         sys.exit(1)
 
     actor_id = args.actor_id or args.agent_id
-    if actor_id != args.agent_id and not has_permission(context_root, actor_id, "record_any_agent"):
-        print(json.dumps(permission_denied(actor_id, "record_any_agent", agent_role(context_root, actor_id)), indent=2))
+    capability = "record_any_agent" if actor_id != args.agent_id else "record_self"
+    if not has_permission(context_root, actor_id, capability):
+        print(json.dumps(permission_denied(actor_id, capability, agent_role(context_root, actor_id)), indent=2))
         sys.exit(1)
 
     path = context_root / "agent-tree.html"

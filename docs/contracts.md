@@ -142,8 +142,8 @@ Default roles:
 - `worker`: acquire free locks, release own locks, record itself.
 - `readonly`: run read-only checks only.
 
-Unknown agents default to `worker`. `agentRoles` in `config.json` maps explicit
-agent IDs to roles.
+Unknown agents default to `readonly`. `agentRoles` in `config.json` maps
+explicit agent IDs to mutating roles.
 
 ## Decision Graph
 

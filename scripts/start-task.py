@@ -15,14 +15,14 @@ from context_utils import (
     add_active_lock,
     agent_role,
     append_ledger_event,
+    context_mutex,
     find_context_root,
     has_permission,
-    match_tracks,
-    parse_tracks,
     permission_denied,
     read_config,
     read_meta,
     remove_active_lock,
+    resolve_context_page,
     repo_root,
     set_meta_in_content,
     stale_tracks,
@@ -44,7 +44,7 @@ def page_review_time(page_path: Path) -> str:
 
 
 def check_staleness(context_root: Path, page: str) -> dict:
-    page_path = context_root / page
+    page_path = resolve_context_page(context_root, page)
     if not page_path.exists():
         return {"status": "untracked", "stale": False, "reason": "page does not exist yet"}
 
@@ -116,7 +116,12 @@ def lock_age_minutes(locked_at: str) -> float | None:
 
 
 def acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
-    page_path = context_root / page
+    with context_mutex(context_root, f"lock-{page}"):
+        return _acquire_lock(context_root, page, agent_id)
+
+
+def _acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
+    page_path = resolve_context_page(context_root, page)
     if not page_path.exists():
         result = {
             "status": "blocked_active_lock",
@@ -184,7 +189,7 @@ def main():
 
     context_root = find_context_root()
     if not context_root:
-        print(json.dumps({"error": "No context/ directory found"}))
+        print(json.dumps({"status": "error", "error": "No context/ directory found"}))
         sys.exit(1)
 
     if args.read_only:
@@ -197,7 +202,14 @@ def main():
         return
 
     if not args.page:
-        print(json.dumps({"error": "--page required for write tasks"}))
+        print(json.dumps({"status": "error", "error": "--page required for write tasks"}))
+        sys.exit(1)
+
+    try:
+        page_path = resolve_context_page(context_root, args.page)
+        page = page_path.relative_to(context_root).as_posix()
+    except ValueError as e:
+        print(json.dumps({"status": "error", "error": str(e)}))
         sys.exit(1)
 
     if not has_permission(context_root, args.agent_id, "acquire_lock"):
@@ -206,13 +218,13 @@ def main():
         sys.exit(1)
 
     task_class = classify_task(args.lines, args.files)
-    staleness = check_staleness(context_root, args.page)
-    lock_status = acquire_lock(context_root, args.page, args.agent_id)
+    staleness = check_staleness(context_root, page)
+    lock_status = acquire_lock(context_root, page, args.agent_id)
 
     result = {
         "status": lock_status.get("status"),
         "task_class": task_class,
-        "page": args.page,
+        "page": page,
         "intent": args.intent,
         "lock_status": lock_status,
         "staleness": staleness,

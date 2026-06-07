@@ -3,7 +3,7 @@ name: context-architecture
 description: Bootstrap and operate a map-first local context wiki for agent work. Deterministic scripts own all routine (locks, ledgers, validation, rendering). LLMs own only judgment calls (significance, routing, rationale).
 context_architecture:
   contract_version: 1
-  default_role: worker
+  default_role: readonly
   permission_profiles: templates/permission-profiles.json
 ---
 
@@ -35,14 +35,14 @@ All writes must be surgical. Produce ONLY what was asked. No adjacent cleanup, n
 
 ### Bootstrap (new project)
 ```bash
-python ~/.claude/skills/context-architecture/scripts/bootstrap.py --target /path/to/project --scan
+python <skill_dir>/scripts/bootstrap.py --target /path/to/project --scan
 ```
 Scans repo, presents findings batch-style, asks targeted questions for ambiguities, generates full context/ skeleton.
 
 ### Absorb Existing Docs
 When a project already has documentation (README, ANALYSIS.md, wiki exports, etc.), `bootstrap.py --scan` reports headed doc import candidates. Import is explicit and small:
 ```bash
-python ~/.claude/skills/context-architecture/scripts/bootstrap.py --target /path/to/project --absorb-docs
+python <skill_dir>/scripts/bootstrap.py --target /path/to/project --absorb-docs
 ```
 This creates headed HTML pages, copies originals under `context/archived/`, and links pages into the index. Do not create pages from chat automatically.
 
@@ -89,7 +89,7 @@ Updates advisory `agent-tree.html`. Use it before asking the orchestrator to rel
 ```bash
 python context/scripts/close-task.py --page <page> --summary "<what changed>"
 ```
-Releases lock, appends ledger, bumps timestamp, validates, regenerates docs.
+Validates first. If validation passes, releases lock, appends ledger, bumps timestamp, and regenerates docs. If validation fails, keeps the lock for repair.
 
 ### Validation (anytime)
 ```bash
@@ -99,7 +99,7 @@ python context/scripts/validate.py
 ## Verification (smoke test)
 
 ```bash
-bash ~/.claude/skills/context-architecture/smoke.sh
+bash <skill_dir>/smoke.sh
 ```
 
 Exercises full lifecycle and contract failures: bootstrap → lock contention → stale lock break → route/freshness → track repair → reachability/hygiene → decision validation → close validation warning → docs. Exit 0 = all pass. Run after any script change.
@@ -152,4 +152,4 @@ context/
 - New page only when no existing page owns topic, knowledge is durable, and a future read trigger exists
 - Decisions form a graph (`data-builds-on`, required rationale fields, optional `data-tracks`)
 - Lock arbitration: subagents self-manage, orchestrator arbitrates contention
-- Hooks enforce locks for subagents (advisory for orchestrator)
+- Hooks are optional/advisory unless installed and verified in the active runtime

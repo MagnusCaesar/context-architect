@@ -15,17 +15,28 @@ if [[ "$BASENAME" == "index.html" ]]; then
     exit 0
 fi
 
-# Check if page is locked
-LOCKED=$(grep -oP '<meta\s+name="locked"\s+content="\K[^"]+' "$FILE" 2>/dev/null)
+read_meta() {
+    python3 - "$FILE" "$1" <<'PY'
+import re
+import sys
+path, name = sys.argv[1], sys.argv[2]
+text = open(path, errors="replace").read()
+m = re.search(r'<meta\s+name="' + re.escape(name) + r'"\s+content="([^"]*)"', text)
+print(m.group(1) if m else "")
+PY
+}
 
-if [[ "$LOCKED" == "false" ]] || [[ -z "$LOCKED" ]]; then
+# Check if page is locked
+LOCKED=$(read_meta locked)
+
+if [[ "$LOCKED" != "true" ]]; then
     echo "BLOCKED: Page $BASENAME is not locked. Run start-task.py first."
     exit 1
 fi
 
 # If we have AGENT_ID, verify ownership
 if [[ -n "$AGENT_ID" ]]; then
-    LOCKED_BY=$(grep -oP '<meta\s+name="locked-by"\s+content="\K[^"]+' "$FILE" 2>/dev/null)
+    LOCKED_BY=$(read_meta locked-by)
     if [[ "$LOCKED_BY" != "$AGENT_ID" ]] && [[ "$LOCKED_BY" != "orchestrator" ]]; then
         echo "BLOCKED: Page $BASENAME locked by $LOCKED_BY, not $AGENT_ID."
         exit 1
