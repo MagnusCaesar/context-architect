@@ -13,7 +13,7 @@ The framework should reduce agent context usage and make routine coordination en
 - `SKILL.md`: skill entrypoint and core workflow.
 - `docs/contracts.md`: authoritative contracts and status schemas.
 - `scripts/`: deterministic implementation.
-- `templates/`: files copied into target repos.
+- `templates/`: defaults and support files used by bootstrap.
 - `hooks/`: optional hook helpers.
 - `smoke.sh`: lifecycle verification.
 - `README.md`: public human guide.
@@ -23,6 +23,7 @@ The framework should reduce agent context usage and make routine coordination en
 
 - Prefer minimal edits.
 - Keep deterministic behavior in scripts, not prompts.
+- Treat generated target HTML pages as source of truth; `context/docs/` Markdown is generated only.
 - Keep framework contracts separate from project payload.
 - Do not make hooks mandatory; verify hook payloads before relying on them.
 - Do not make Graphify, context-mode, or MCP mandatory.
@@ -42,7 +43,7 @@ If maintaining this repository from Claude Code, use the framework's scripts dir
 Run:
 
 ```bash
-python /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
 bash smoke.sh
 git diff --check
 ```

@@ -21,7 +21,8 @@ Optimize for:
 - `docs/contracts.md`: authoritative contracts and status schemas.
 - `scripts/bootstrap.py`: creates target `context/`.
 - `scripts/context_utils.py`: shared low-level helpers.
-- `scripts/start-task.py`, `close-task.py`, `route-diff.py`, `update-tracks.py`, `validate.py`: main target-repo lifecycle tools.
+- `scripts/start-task.py`, `close-task.py`, `route-diff.py`, `check-freshness.py`, `update-tracks.py`, `validate.py`: main target-repo lifecycle tools.
+- `scripts/generate-docs.py`: generated Markdown renderer normally called by close-task.
 - `scripts/check-reachability.py`, `daily-hygiene.py`: orphan/broken-link hygiene.
 - `scripts/record-agent.py`: advisory agent tree updates.
 - `scripts/harden-ledger.sh`, `check-hardening.py`: append-only/runtime boundary checks.
@@ -59,7 +60,7 @@ Keep outputs bounded. Program analysis instead of manually reading large raw out
 Run after meaningful changes:
 
 ```bash
-python /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
 bash smoke.sh
 git diff --check
 ```

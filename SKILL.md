@@ -39,65 +39,66 @@ For bundled scripts, set `SKILL_DIR` to the directory containing this `SKILL.md`
 
 ### Bootstrap (new project)
 ```bash
-python "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --scan
+python3 "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --scan
+python3 "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project
 ```
-Scans repo, presents findings batch-style, asks targeted questions for ambiguities, generates full context/ skeleton.
+`--scan` is inventory-only and does not write files. Run without `--scan` to generate the full `context/` skeleton after resolving ambiguities.
 
 ### Absorb Existing Docs
 When a project already has documentation (README, ANALYSIS.md, wiki exports, etc.), `bootstrap.py --scan` reports headed doc import candidates. Import is explicit and small:
 ```bash
-python "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --absorb-docs
+python3 "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --absorb-docs
 ```
 This creates headed HTML pages, copies originals under `context/archived/`, and links pages into the index. Do not create pages from chat automatically.
 
 ### Task Start
 ```bash
-python context/scripts/start-task.py --page <page> --intent "<what you're doing>"
+python3 context/scripts/start-task.py --page <page> --intent "<what you're doing>"
 ```
 Classifies task, checks staleness, acquires lock if needed. Returns: task class + status.
 
 ### Route Changed Files
 ```bash
-python context/scripts/route-diff.py --files src/parser.py
-python context/scripts/route-diff.py --from HEAD~1 --to HEAD
+python3 context/scripts/route-diff.py --files src/parser.py
+python3 context/scripts/route-diff.py --from HEAD~1 --to HEAD
 ```
 Matches changed files to page-local `<meta name="tracks">`. Reports matched pages, unmatched files, and stale tracks. No semantic guessing.
 
 ### Repair Tracks
 ```bash
-python context/scripts/update-tracks.py --page parser.html --add src/parser.py --remove src/old_parser.py
+python3 context/scripts/update-tracks.py --page parser.html --add src/parser.py --remove src/old_parser.py
 ```
 Explicit orchestrator repair for stale or missing `tracks` metadata.
 
 ### Reachability And Daily Hygiene
 ```bash
-python context/scripts/check-reachability.py --json
-python context/scripts/daily-hygiene.py --json
+python3 context/scripts/check-reachability.py --json
+python3 context/scripts/daily-hygiene.py --json
 ```
 Reachability checks whether live context pages are discoverable from the project bootloader/head page. Daily hygiene is normally hidden: the first non-hygiene ledger event each day runs it automatically and records a `daily_hygiene` event.
 
 ### Ledger Hardening
 ```bash
 context/scripts/harden-ledger.sh context
-python context/scripts/check-hardening.py --json
+python3 context/scripts/check-hardening.py --json
 ```
 Optional Linux hardening for `context/ledger-events.ndjson`. Run `harden-ledger.sh` as root, an elevated user, or another Unix user that the agent cannot control. If the agent can run `chattr -a`, hardening is advisory only.
 
 ### Agent Coordination
 ```bash
-python context/scripts/record-agent.py --agent-id worker-1 --parent-id orchestrator --role verifier --task "validate parser" --page parser.html --status spawned --actor-id orchestrator
+python3 context/scripts/record-agent.py --agent-id worker-1 --parent-id orchestrator --role verifier --task "validate parser" --page parser.html --status spawned --actor-id orchestrator
 ```
 Updates advisory `agent-tree.html`. Use it before asking the orchestrator to release or arbitrate another agent's work. It is not lock authority.
 
 ### Task Close
 ```bash
-python context/scripts/close-task.py --page <page> --summary "<what changed>"
+python3 context/scripts/close-task.py --page <page> --summary "<what changed>"
 ```
 Validates first. If validation passes, releases lock, appends ledger, bumps timestamp, and regenerates docs. If validation fails, keeps the lock for repair.
 
 ### Validation (anytime)
 ```bash
-python context/scripts/validate.py
+python3 context/scripts/validate.py
 ```
 
 ## Verification (smoke test)
@@ -139,7 +140,9 @@ context/
 │   ├── harden-ledger.sh
 │   ├── record-agent.py
 │   └── context_utils.py
+├── hooks/                  # Optional runtime hooks
 ├── docs/                   # Auto-generated markdown (for humans)
+├── archived/               # Copies of absorbed docs
 ├── runtime-policy.md       # Sandbox/OS hardening guidance
 └── [project pages].html    # Domain-specific knowledge pages
 ```
@@ -152,7 +155,7 @@ context/
 - Discovery blocks via `<meta name="read-when">`, `<meta name="update-when">`, and page-local `<meta name="tracks">`
 - `ledger-events.ndjson` is append-only audit; `ledger.html` is a bounded view; wiki/decision pages hold durable knowledge
 - `agent-tree.html` is advisory coordination; locks remain page metas plus ledger active locks
-- Permission profiles are declared in skill frontmatter, seeded into config, and enforced by scripts
+- Permission profile defaults live in `templates/permission-profiles.json`; skill frontmatter points to that template, bootstrap seeds config, and scripts enforce generated `context/config.json`
 - New page only when no existing page owns topic, knowledge is durable, and a future read trigger exists
 - Decisions form a graph (`data-builds-on`, required rationale fields, optional `data-tracks`)
 - Lock arbitration: subagents self-manage, orchestrator arbitrates contention

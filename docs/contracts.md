@@ -7,14 +7,23 @@ justified.
 
 ## Status Contracts
 
-- `start-task.py`: `acquired`, `blocked_active_lock`, `broke_stale_lock`
-- `close-task.py`: `released`, `release_denied_wrong_owner`, `validation_warning`
-- `check-freshness.py`: `fresh`, `stale`, `untracked`
-- `route-diff.py`: top-level `matched_pages`, `unmatched_files`, `stale_tracks`
-- `check-reachability.py`: `ok`, `warning`, `orphans_found`
-- `daily-hygiene.py`: `ok`, `warning`, `critical`, `skipped`
-- `record-agent.py`: `recorded`, `permission_denied`
-- mutating scripts may return `permission_denied`
+| Script | Stable output contract |
+|--------|------------------------|
+| `bootstrap.py` | JSON `status: error` for rejected inputs; scan/generate modes otherwise print structured findings or generation summary. |
+| `start-task.py` | JSON `status`: `acquired`, `blocked_active_lock`, `broke_stale_lock`, `read_only`, `error`; also returns `task_class` where applicable. |
+| `close-task.py` | JSON `status`: `released`, `release_denied_wrong_owner`, `validation_warning`, `error`; validation warnings keep the lock. |
+| `check-freshness.py` | JSON `status`: `fresh`, `stale`, `untracked`, `unknown`, `error`. `unknown` means git/source state could not be proven. |
+| `route-diff.py` | JSON top-level keys: `matched_pages`, `affected_decisions`, `unmatched_files`, `stale_tracks`, `untracked_pages`; may return `status: error` on fatal input/git failures. |
+| `update-tracks.py` | JSON `status`: `updated`, `unchanged`, `error`; mutating calls may return `permission_denied`. |
+| `check-reachability.py` | JSON `status`: `ok`, `warning`, `orphans_found`; broken links are reported as `warning` here and escalated by `validate.py`. |
+| `daily-hygiene.py` | JSON `status`: `ok`, `warning`, `critical`, `skipped`, `error`. |
+| `record-agent.py` | JSON `status`: `recorded`, `permission_denied`, `error`. |
+| `check-hardening.py` | JSON `status`: `ok`, `error`; inspect hardening fields such as `ledger_append_only`, `dangerous_commands_on_path`, and protected-file writability for strength. |
+| `generate-docs.py` | Text output only; exit status is the contract. |
+| `validate.py` | Text output plus exit status; non-zero means contract failure. |
+
+Mutating scripts may return `permission_denied` when `context/config.json`
+does not grant the requested capability.
 
 Existing JSON fields should be preserved where practical. New callers should use
 the stable `status` field.
@@ -101,7 +110,9 @@ and `context/docs/**`, then uses BFS over bootloader context references and
 internal HTML links. `tracks`, ledger events, and decision refs are not
 reachability edges.
 
-Broken internal links are critical. Orphans and fallback roots are warnings.
+Broken internal links are reported as `warning` by `check-reachability.py` and
+escalated to validation failure by `validate.py`. Orphans and fallback roots are
+warnings in V1.
 
 ## Agent Tree
 
@@ -127,9 +138,10 @@ ledger event. `active` refreshes update only `agent-tree.html`.
 
 ## Permissions
 
-`SKILL.md` declares the permission profile template in frontmatter.
-`bootstrap.py` seeds those defaults into `context/config.json`. Scripts enforce
-`config.json`; the skill file itself is only declaration.
+Permission profile defaults live in `templates/permission-profiles.json`.
+`SKILL.md` frontmatter points to that template. `bootstrap.py` seeds those
+defaults into `context/config.json`. Scripts enforce `config.json`; the skill
+file itself is only declaration.
 
 Script permissions are workflow enforcement, not an OS sandbox. To prevent an
 agent from bypassing scripts, the runtime must deny dangerous commands and/or
