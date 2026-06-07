@@ -13,6 +13,7 @@ Use when:
 - Starting a new project that needs structured documentation
 - An existing project needs a context system bootstrapped
 - The user asks for a deterministic context control plane, ledger, locks, decision graph, or context hygiene
+- Invoke once per target directory. After bootstrap, generated `AGENTS.md`/`CLAUDE.md` own routine context work.
 
 ## Operating Principle
 
@@ -37,12 +38,15 @@ All writes must be surgical. Produce ONLY what was asked. No adjacent cleanup, n
 
 For bundled scripts, set `SKILL_DIR` to the directory containing this `SKILL.md`. In Codex this is normally the active skill folder, for example `~/.codex/skills/context-architecture` when installed locally. If the user says "this repo" and gives no target, use the current working directory as the target.
 
+This is a one-time bootstrap skill for each target directory. Rerun only to repair
+or upgrade the installed context architecture.
+
 ### Bootstrap (new project)
 ```bash
 python3 "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --scan
 python3 "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project
 ```
-`--scan` is inventory-only and does not write files. Run without `--scan` to generate the full `context/` skeleton after resolving ambiguities.
+`--scan` is inventory-only and does not write files. Run without `--scan` to generate the full `context/` skeleton and managed `AGENTS.md`/`CLAUDE.md` bootloader blocks after resolving ambiguities.
 
 ### Absorb Existing Docs
 When a project already has documentation (README, ANALYSIS.md, wiki exports, etc.), `bootstrap.py --scan` reports headed doc import candidates. Import is explicit and small:
@@ -118,6 +122,8 @@ Exercises full lifecycle and contract failures: bootstrap → lock contention �
 ## Architecture (what gets generated)
 
 ```
+AGENTS.md                    # Agent bootloader with managed context block
+CLAUDE.md                    # Claude bootloader with managed context block
 context/
 ├── index.html              # Map-first retrieval router
 ├── control-plane.html      # Runtime checklist

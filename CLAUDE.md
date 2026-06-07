@@ -24,6 +24,8 @@ The framework should reduce agent context usage and make routine coordination en
 - Prefer minimal edits.
 - When this skill is invoked, run deterministic scripts yourself when tool
   permissions allow. Do not merely explain commands for the user to run.
+- Preserve the one-shot model: `$context-architecture` is invoked once per
+  target directory, then generated target `AGENTS.md`/`CLAUDE.md` take over.
 - Keep deterministic behavior in scripts, not prompts.
 - Treat generated target HTML pages as source of truth; `context/docs/` Markdown is generated only.
 - Keep framework contracts separate from project payload.

@@ -35,6 +35,8 @@ Optimize for:
 
 - When this skill is invoked, run deterministic scripts yourself when tool
   permissions allow. Do not merely explain commands for the user to run.
+- Preserve the one-shot model: `$context-architecture` is invoked once per
+  target directory, then generated target `AGENTS.md`/`CLAUDE.md` take over.
 - Do not mutate generated target behavior casually. Update contracts, templates, scripts, and smoke coverage together.
 - Keep `README.md` human-facing. Keep exact contracts in `docs/contracts.md`.
 - Keep `SKILL.md` small; move detailed contract text to `docs/contracts.md`.

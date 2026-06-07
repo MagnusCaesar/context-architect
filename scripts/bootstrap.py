@@ -216,6 +216,68 @@ def checked_page_name(context_dir: Path, name: str) -> str:
     return resolve_context_page(context_dir, name).relative_to(context_dir).as_posix()
 
 
+BOOTLOADER_START = "<!-- context-architecture:start -->"
+BOOTLOADER_END = "<!-- context-architecture:end -->"
+
+
+def render_bootloader_block() -> str:
+    return f"""{BOOTLOADER_START}
+## Context Architecture
+
+This repository has a deterministic local context architecture installed under `context/`.
+
+Start here for non-trivial work:
+
+- Read `context/index.html` before broad source exploration.
+- Use `context/control-plane.html` to choose read-only, tiny write, or standard write workflow.
+- Use `context/ledger.html` and `context/agent-tree.html` to see active work before escalating.
+- Use `context/decisions.html` for durable rationale.
+
+Routine context operations are script-owned. When tool permissions allow, run the scripts yourself instead of asking the user:
+
+- `python3 context/scripts/start-task.py --page <page> --intent "<intent>"`
+- `python3 context/scripts/route-diff.py --from HEAD~1 --to HEAD`
+- `python3 context/scripts/check-freshness.py --json`
+- `python3 context/scripts/update-tracks.py --page <page> --add <path>`
+- `python3 context/scripts/close-task.py --page <page> --summary "<summary>"`
+- `python3 context/scripts/validate.py`
+
+Rules:
+
+- HTML pages under `context/` are source of truth; `context/docs/` is generated.
+- Page-local `<meta name="tracks">` owns source freshness. Missing tracks never means scan the whole repo.
+- Ledger is audit history, not durable memory. Durable knowledge belongs in wiki pages and decisions.
+- Unknown agents default to `readonly`; mutating roles must be explicit in `context/config.json`.
+- Prefer context-mode for large analysis, but do not replace deterministic scripts with semantic search.
+{BOOTLOADER_END}
+"""
+
+
+def upsert_bootloader(path: Path, title: str) -> None:
+    block = render_bootloader_block().rstrip() + "\n"
+    if path.exists():
+        text = path.read_text(errors="replace")
+        pattern = re.compile(
+            rf"{re.escape(BOOTLOADER_START)}.*?{re.escape(BOOTLOADER_END)}\n?",
+            flags=re.S,
+        )
+        if pattern.search(text):
+            updated = pattern.sub(block, text)
+        else:
+            updated = text.rstrip() + "\n\n" + block
+    else:
+        updated = f"# {title}\n\n{block}"
+    write_atomic(path, updated)
+
+
+def install_bootloaders(target: Path) -> list[str]:
+    written = []
+    for filename, title in (("AGENTS.md", "Agent Instructions"), ("CLAUDE.md", "Claude Instructions")):
+        upsert_bootloader(target / filename, title)
+        written.append(filename)
+    return written
+
+
 def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> list:
     imported = []
     for candidate in doc_import_candidates(target, findings):
@@ -647,6 +709,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
         if not page_path.exists():
             write_atomic(page_path, stub_html, context_root=context_dir)
 
+    install_bootloaders(target)
     return context_dir
 
 
@@ -705,6 +768,7 @@ def main():
     print(f"  - {len(list(context_dir.glob('*.html')))} HTML pages")
     print(f"  - {len(list((context_dir / 'scripts').glob('*.py')))} scripts")
     print(f"  - {len(list((context_dir / 'hooks').glob('*.sh')))} hooks")
+    print(f"  - AGENTS.md and CLAUDE.md bootloader blocks")
     print(f"  - config.json")
     print(f"  - runtime-policy.md")
     if findings.get("doc_files"):
@@ -713,9 +777,8 @@ def main():
         print(f"  - imported docs: {len(imported)}")
     print(f"\nNext steps:")
     print(f"  1. Review and fill stub pages with project-specific content")
-    print(f"  2. Run: python context/scripts/validate.py")
-    print(f"  3. Add to CLAUDE.md: see context/index.html for knowledge base")
-    print(f"  4. For real ledger hardening, have root/elevated/non-agent user run: context/scripts/harden-ledger.sh context")
+    print(f"  2. Run: python3 context/scripts/validate.py")
+    print(f"  3. For real ledger hardening, have root/elevated/non-agent user run: context/scripts/harden-ledger.sh context")
 
 
 if __name__ == "__main__":

@@ -5,9 +5,9 @@ Deterministic repo-local context architecture for Codex, Claude Code, and other 
 This project is both:
 
 - a Codex skill, via `SKILL.md`
-- a bootstrapper that installs a `context/` control plane into target repositories
+- a one-time bootstrapper that installs repo-local agent instructions and a `context/` control plane into target repositories
 
-The core rule is simple: scripts own routine mechanics; agents own judgment. Humans invoke the skill; the agent runs the deterministic scripts automatically when permissions allow.
+The core rule is simple: scripts own routine mechanics; agents own judgment. Humans invoke the skill once; bootstrap writes `AGENTS.md`/`CLAUDE.md` into the target repo, and future agents follow those local instructions.
 
 ## Use
 
@@ -40,23 +40,16 @@ or:
 Use $context-architecture to add deterministic context architecture to /path/to/project
 ```
 
-After bootstrap, keep using the skill for context work:
-
-```text
-$context-architecture start work on parser context
-$context-architecture route my current diff
-$context-architecture update stale tracks
-$context-architecture close the parser context task
-$context-architecture validate context
-```
-
-The agent should run the bundled scripts itself. You should not normally need to
-run those scripts manually unless you are debugging, running CI, or operating
-without an agent.
+After bootstrap, stop invoking this skill for routine work. Open future Codex,
+Claude, or other agent sessions normally in the target repo; the generated
+`AGENTS.md` and `CLAUDE.md` tell agents to use `context/index.html` and run the
+local deterministic scripts themselves.
 
 What gets installed into a target repo:
 
 ```text
+AGENTS.md                    # Agent bootloader with managed context block
+CLAUDE.md                    # Claude bootloader with managed context block
 context/
 ├── index.html              # Map-first retrieval router
 ├── control-plane.html      # Runtime checklist
@@ -95,7 +88,7 @@ Authoritative files:
 - `hooks/`: optional hook helpers
 - `agents/openai.yaml`: Codex UI metadata
 - `smoke.sh`: integration and contract smoke coverage
-- `AGENTS.md` and `CLAUDE.md`: maintainer instructions for this framework repo only
+- `AGENTS.md` and `CLAUDE.md`: maintainer instructions for this framework repo only; target repos get their own generated managed blocks
 
 Bootstrap a target repo manually:
 
@@ -115,6 +108,9 @@ python3 scripts/bootstrap.py --target /path/to/project --pages-json '[{"name":"p
 `--scan` is inventory-only and does not write files. `--absorb-docs` imports headed docs, copies originals under `context/archived/`, links the new pages, and avoids semantic page generation.
 
 Manual target-repo lifecycle commands:
+
+These are the commands generated bootloader files tell future agents to run.
+Humans usually run them only for debugging, CI, or non-agent operation.
 
 ```bash
 python3 context/scripts/start-task.py --page parser.html --intent "fix parser timing docs"

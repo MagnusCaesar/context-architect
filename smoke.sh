@@ -104,6 +104,8 @@ step_output "bootstrap --scan produces JSON" '"root"' \
 # Generate mode
 step "bootstrap generates context/" \
     python3 "$SCRIPTS/bootstrap.py" --target "$TMP"
+step_output "bootstrap reports bootloader files" "AGENTS.md and CLAUDE.md" \
+    python3 "$SCRIPTS/bootstrap.py" --target "$TMP"
 
 BAD_TMP=$(mktemp -d)
 step_output "bootstrap rejects escaping page names" '"status": "error"' \
@@ -129,6 +131,22 @@ PY
 
 # Verify structure
 step "index.html exists" test -f "$TMP/context/index.html"
+step "AGENTS.md exists" test -f "$TMP/AGENTS.md"
+step "CLAUDE.md exists" test -f "$TMP/CLAUDE.md"
+step "AGENTS.md points to context index" grep -q "context/index.html" "$TMP/AGENTS.md"
+step "CLAUDE.md points to context index" grep -q "context/index.html" "$TMP/CLAUDE.md"
+step "AGENTS.md managed block is idempotent" python3 - "$TMP/AGENTS.md" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+raise SystemExit(0 if text.count("context-architecture:start") == 1 else 1)
+PY
+step "CLAUDE.md managed block is idempotent" python3 - "$TMP/CLAUDE.md" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+raise SystemExit(0 if text.count("context-architecture:start") == 1 else 1)
+PY
 step "control-plane.html exists" test -f "$TMP/context/control-plane.html"
 step "ledger.html exists" test -f "$TMP/context/ledger.html"
 step "ledger-events.ndjson exists" test -f "$TMP/context/ledger-events.ndjson"
@@ -249,7 +267,7 @@ step "check-freshness.py runs" \
     python3 "$TMP/context/scripts/check-freshness.py"
 
 python3 "$TMP/context/scripts/check-reachability.py" --json > /tmp/reachability.json
-step_json_file "reachability fallback root warning" /tmp/reachability.json "data['fallback_root'] is True and data['root'] == 'context/index.html'"
+step_json_file "reachability uses AGENTS root" /tmp/reachability.json "data['fallback_root'] is False and data['root'] == 'AGENTS.md' and 'context/index.html' in data['reachable']"
 
 python3 "$TMP/context/scripts/record-agent.py" --agent-id worker-1 --parent-id orchestrator --role verifier --task "check decisions" --page decisions.html --status spawned --actor-id orchestrator >/tmp/agent-spawn.json
 step_json_file "record-agent records spawn" /tmp/agent-spawn.json "data['status'] == 'recorded' and data['ledger_appended'] is True"
@@ -281,7 +299,7 @@ s = s.replace("</ul>", '        <li><a href="./sub/nested.html">nested</a></li>\
 p.write_text(s)
 PY
 python3 "$TMP/context/scripts/check-reachability.py" --json > /tmp/reachability-nested.json
-step_json_file "reachability returns shortest path" /tmp/reachability-nested.json "'context/sub/nested.html' in data['paths'] and data['paths']['context/sub/nested.html'][0] == 'context/index.html'"
+step_json_file "reachability returns shortest path" /tmp/reachability-nested.json "'context/sub/nested.html' in data['paths'] and data['paths']['context/sub/nested.html'][0] == 'AGENTS.md' and 'context/index.html' in data['paths']['context/sub/nested.html']"
 python3 - <<'PY'
 from pathlib import Path
 p = Path("context/index.html")

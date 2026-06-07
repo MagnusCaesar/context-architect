@@ -9,7 +9,7 @@ justified.
 
 | Script | Stable output contract |
 |--------|------------------------|
-| `bootstrap.py` | JSON `status: error` for rejected inputs; scan/generate modes otherwise print structured findings or generation summary. |
+| `bootstrap.py` | JSON `status: error` for rejected inputs; scan/generate modes otherwise print structured findings or generation summary. Generate mode creates `context/` and upserts managed bootloader blocks in target `AGENTS.md` and `CLAUDE.md`. |
 | `start-task.py` | JSON `status`: `acquired`, `blocked_active_lock`, `broke_stale_lock`, `read_only`, `error`; also returns `task_class` where applicable. |
 | `close-task.py` | JSON `status`: `released`, `release_denied_wrong_owner`, `validation_warning`, `error`; validation warnings keep the lock. |
 | `check-freshness.py` | JSON `status`: `fresh`, `stale`, `untracked`, `unknown`, `error`. `unknown` means git/source state could not be proven. |
@@ -96,6 +96,10 @@ assumptions are actually true for the current process.
 
 Reachability answers whether a fresh agent can discover a context page from the
 bootloader or head page. It is separate from freshness tracking.
+
+Bootstrap installs managed context-architecture blocks in target `AGENTS.md` and
+`CLAUDE.md`. Those files are the normal roots after setup; `context/index.html`
+is only the fallback root when no bootloader file exists.
 
 Root priority:
 
