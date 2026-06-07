@@ -7,59 +7,28 @@ This project is both:
 - a Codex skill, via `SKILL.md`
 - a bootstrapper that installs a `context/` control plane into target repositories
 
-The core rule is simple: scripts own routine mechanics; agents own judgment. Locks, ledgers, freshness checks, reachability, routing, validation, generated docs, and agent-tree entries are deterministic script work. Agents decide significance, rationale, whether context should be merged or archived, and how to explain changes.
+The core rule is simple: scripts own routine mechanics; agents own judgment. Humans invoke the skill; the agent runs the deterministic scripts automatically when permissions allow.
 
-## Why
+## Use
 
-Large agent sessions drift when every agent rereads raw files, guesses which notes matter, and freehands coordination state. `context-architect` gives each repository a small local context system:
-
-- map-first retrieval through `context/index.html`
-- page-local source ownership through `<meta name="tracks">`
-- lock and event history through `ledger.html` plus `ledger-events.ndjson`
-- advisory multi-agent visibility through `agent-tree.html`
-- durable rationale through `decisions.html`
-- orphan/broken-link hygiene through deterministic reachability checks
-- bounded generated Markdown docs for humans
-
-It is not a semantic graph database and does not replace context-mode, Graphify, grep, or source reading. It is the enforceable control layer around local project memory.
-
-## Strongly Recommended: context-mode
-
-Use context-mode with this framework. This project keeps repo-local context state
-deterministic; context-mode keeps large tool output, file analysis, web fetches,
-and indexed search from flooding the model context window.
-
-Install context-mode from its upstream repository:
-
-https://github.com/mksglu/context-mode
-
-Boundary:
-
-- context-mode handles low-context tool execution, indexed retrieval, web/doc
-  fetch indexing, and session-memory search.
-- context-architect handles page-local `tracks`, diff-to-page routing, locks,
-  ledger events, agent tree, decisions, reachability/orphan checks, permissions,
-  and generated `context/` structure.
-
-Treat them as complementary. Do not replace deterministic framework scripts with
-semantic search results.
-
-## Install As A Codex Skill
-
-Normal GitHub install:
+Install this repository as a Codex skill:
 
 ```bash
 git clone git@github.com:MagnusCaesar/context-architect.git ~/.codex/skills/context-architecture
 ```
 
-Development checkout install:
+For development, symlink a working checkout instead:
 
 ```bash
 git clone git@github.com:MagnusCaesar/context-architect.git /path/to/context-architecture
 ln -s /path/to/context-architecture ~/.codex/skills/context-architecture
 ```
 
-Then start a fresh Codex session and invoke:
+Strongly install context-mode too. It keeps large command output, file analysis, web fetches, and indexed search from flooding the model context window:
+
+https://github.com/mksglu/context-mode
+
+Then start a fresh Codex session and ask for the skill:
 
 ```text
 $context-architecture bootstrap this repo
@@ -71,38 +40,21 @@ or:
 Use $context-architecture to add deterministic context architecture to /path/to/project
 ```
 
-## Bootstrap A Target Repo
+After bootstrap, keep using the skill for context work:
 
-From this repository:
-
-```bash
-python3 scripts/bootstrap.py --target /path/to/project --scan
+```text
+$context-architecture start work on parser context
+$context-architecture route my current diff
+$context-architecture update stale tracks
+$context-architecture close the parser context task
+$context-architecture validate context
 ```
 
-Generate the context skeleton:
+The agent should run the bundled scripts itself. You should not normally need to
+run those scripts manually unless you are debugging, running CI, or operating
+without an agent.
 
-```bash
-python3 scripts/bootstrap.py --target /path/to/project
-```
-
-Import headed existing docs into small HTML pages:
-
-```bash
-python3 scripts/bootstrap.py --target /path/to/project --absorb-docs
-```
-
-Use explicit page input when the scan is not enough:
-
-```bash
-python3 scripts/bootstrap.py --target /path/to/project --config /path/to/pages.json
-python3 scripts/bootstrap.py --target /path/to/project --pages-json '[{"name":"parser.html","purpose":"Parser context"}]'
-```
-
-`--absorb-docs` is intentionally small. It imports headed docs, copies originals under `context/archived/`, links the new pages, and avoids semantic page generation.
-
-## Generated Target Layout
-
-Bootstrap creates:
+What gets installed into a target repo:
 
 ```text
 context/
@@ -123,64 +75,64 @@ context/
 
 The HTML files are the source of truth. Markdown under `context/docs/` is generated for humans.
 
-## Daily Use Inside A Target Repo
+Boundary with context-mode:
 
-Start work:
+- context-mode handles low-context tool execution, indexed retrieval, web/doc fetch indexing, and session-memory search.
+- context-architect handles page-local `tracks`, diff-to-page routing, locks, ledger events, agent tree, decisions, reachability/orphan checks, permissions, and generated `context/` structure.
+
+Treat them as complementary. Do not replace deterministic framework scripts with semantic search results.
+
+## Development
+
+This section is for maintaining this framework or debugging the installed scripts directly.
+
+Authoritative files:
+
+- `SKILL.md`: Codex skill instructions
+- `docs/contracts.md`: status fields, schemas, metadata contracts, memory boundaries
+- `scripts/`: deterministic implementation
+- `templates/`: generated target defaults
+- `hooks/`: optional hook helpers
+- `agents/openai.yaml`: Codex UI metadata
+- `smoke.sh`: integration and contract smoke coverage
+- `AGENTS.md` and `CLAUDE.md`: maintainer instructions for this framework repo only
+
+Bootstrap a target repo manually:
+
+```bash
+python3 scripts/bootstrap.py --target /path/to/project --scan
+python3 scripts/bootstrap.py --target /path/to/project
+python3 scripts/bootstrap.py --target /path/to/project --absorb-docs
+```
+
+Use explicit page input when the scan is not enough:
+
+```bash
+python3 scripts/bootstrap.py --target /path/to/project --config /path/to/pages.json
+python3 scripts/bootstrap.py --target /path/to/project --pages-json '[{"name":"parser.html","purpose":"Parser context"}]'
+```
+
+`--scan` is inventory-only and does not write files. `--absorb-docs` imports headed docs, copies originals under `context/archived/`, links the new pages, and avoids semantic page generation.
+
+Manual target-repo lifecycle commands:
 
 ```bash
 python3 context/scripts/start-task.py --page parser.html --intent "fix parser timing docs"
 python3 context/scripts/start-task.py --page parser.html --intent "audit parser context" --read-only
-```
-
-Route changed files to context pages:
-
-```bash
 python3 context/scripts/route-diff.py --files src/parser.py
 python3 context/scripts/route-diff.py --from HEAD~1 --to HEAD
 python3 context/scripts/check-freshness.py --json
 python3 context/scripts/check-freshness.py --page parser.html --json
-```
-
-Repair page-local source tracking:
-
-```bash
 python3 context/scripts/update-tracks.py --page parser.html --add src/parser.py --remove src/old_parser.py
-```
-
-Record advisory subagent state:
-
-```bash
 python3 context/scripts/record-agent.py --agent-id worker-1 --parent-id orchestrator --role verifier --task "validate parser" --page parser.html --status spawned --actor-id orchestrator
-```
-
-Check reachability and hygiene:
-
-```bash
 python3 context/scripts/check-reachability.py --json
 python3 context/scripts/daily-hygiene.py --json
-```
-
-Daily hygiene also auto-runs once per local day before the first non-`daily_hygiene` ledger event; manual runs are for explicit reports.
-
-Close work:
-
-```bash
 python3 context/scripts/close-task.py --page parser.html --summary "updated parser context"
-```
-
-Validate anytime:
-
-```bash
 python3 context/scripts/validate.py
-```
-
-Render generated Markdown manually:
-
-```bash
 python3 context/scripts/generate-docs.py
 ```
 
-## Permissions And Hardening
+Daily hygiene also auto-runs once per local day before the first non-`daily_hygiene` ledger event; manual runs are for explicit reports.
 
 Permission profiles are workflow enforcement, not an OS sandbox. Scripts enforce roles from `context/config.json`:
 
@@ -199,30 +151,17 @@ python3 context/scripts/check-hardening.py --json
 
 If the same agent can run `chattr -a`, `chmod`, or arbitrary writes to protected files, hardening is advisory only. See generated `context/runtime-policy.md`.
 
-## Development
-
-This repo is the framework source. `AGENTS.md` and `CLAUDE.md` are maintainer instructions for developing this repository only; they are not bootstrap templates.
-
-Useful checks:
+Validation:
 
 ```bash
 python3 /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 -m py_compile scripts/*.py
 bash smoke.sh
 git diff --check
 ```
 
 The smoke test exercises bootstrap/generation, path traversal rejection, unknown-agent permission denial, lock contention, stale lock break, daily hygiene auto-run, route/freshness, track repair/no-op, reachability/hygiene, hardening status, agent lifecycle logging, decision validation, atomic writes, read-only start-task, close validation warnings, and docs generation.
 
-## Authoritative Files
-
-- `SKILL.md`: Codex skill instructions
-- `docs/contracts.md`: status fields, schemas, metadata contracts, memory boundaries
-- `scripts/`: deterministic implementation
-- `templates/`: generated target defaults
-- `hooks/`: optional hook helpers
-- `agents/openai.yaml`: Codex UI metadata
-- `smoke.sh`: integration and contract smoke coverage
-
-## Design History
+Design history:
 
 `context-architecture-replication-report-2026-06-05.md` is a deprecated historical initial reference. It explains early design exploration, but current behavior is defined by `SKILL.md`, `docs/contracts.md`, scripts, templates, and tests.

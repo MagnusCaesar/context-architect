@@ -33,6 +33,8 @@ Optimize for:
 
 ## Development Rules
 
+- When this skill is invoked, run deterministic scripts yourself when tool
+  permissions allow. Do not merely explain commands for the user to run.
 - Do not mutate generated target behavior casually. Update contracts, templates, scripts, and smoke coverage together.
 - Keep `README.md` human-facing. Keep exact contracts in `docs/contracts.md`.
 - Keep `SKILL.md` small; move detailed contract text to `docs/contracts.md`.
