@@ -109,8 +109,10 @@ step "ledger-events.ndjson exists" test -f "$TMP/context/ledger-events.ndjson"
 step "agent-tree.html exists" test -f "$TMP/context/agent-tree.html"
 step "decisions.html exists" test -f "$TMP/context/decisions.html"
 step "config.json exists" test -f "$TMP/context/config.json"
+step "runtime-policy.md exists" test -f "$TMP/context/runtime-policy.md"
 step "scripts/ populated" test -f "$TMP/context/scripts/validate.py"
 step "harden-ledger helper copied" test -f "$TMP/context/scripts/harden-ledger.sh"
+step "check-hardening helper copied" test -f "$TMP/context/scripts/check-hardening.py"
 
 echo ""
 echo "Phase 2: Task lifecycle"
@@ -174,6 +176,9 @@ echo "Phase 3: Utilities"
 # Validate
 step "validate.py passes" \
     python3 "$TMP/context/scripts/validate.py"
+
+step_output "check-hardening reports status" '"status":' \
+    python3 "$TMP/context/scripts/check-hardening.py" --json
 
 # Check freshness
 step "check-freshness.py runs" \

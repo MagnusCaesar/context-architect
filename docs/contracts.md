@@ -76,8 +76,12 @@ hygiene before appending the requested event. Hygiene appends exactly one
 `daily_hygiene` event per day. It does not delete, archive, or spawn agents.
 
 `harden-ledger.sh` may set `chattr +a` on `ledger-events.ndjson` when Linux and
-the filesystem support it. This is optional hardening; scripts must still work
-without it.
+the filesystem support it. Run it as `root`, an elevated user, or another Unix
+user that the agent cannot control. If the agent can run `chattr -a`, hardening
+is advisory only. Scripts must still work without it.
+
+`check-hardening.py` reports whether append-only and runtime-boundary
+assumptions are actually true for the current process.
 
 ## Reachability
 
@@ -126,6 +130,10 @@ ledger event. `active` refreshes update only `agent-tree.html`.
 `SKILL.md` declares the permission profile template in frontmatter.
 `bootstrap.py` seeds those defaults into `context/config.json`. Scripts enforce
 `config.json`; the skill file itself is only declaration.
+
+Script permissions are workflow enforcement, not an OS sandbox. To prevent an
+agent from bypassing scripts, the runtime must deny dangerous commands and/or
+protected file writes as described in `context/runtime-policy.md`.
 
 Default roles:
 

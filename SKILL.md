@@ -75,8 +75,9 @@ Reachability checks whether live context pages are discoverable from the project
 ### Ledger Hardening
 ```bash
 context/scripts/harden-ledger.sh context
+python context/scripts/check-hardening.py --json
 ```
-Optional Linux hardening for `context/ledger-events.ndjson`. The NDJSON file is the append-only event source; `ledger.html` is only a bounded generated view.
+Optional Linux hardening for `context/ledger-events.ndjson`. Run `harden-ledger.sh` as root, an elevated user, or another Unix user that the agent cannot control. If the agent can run `chattr -a`, hardening is advisory only.
 
 ### Agent Coordination
 ```bash
@@ -129,11 +130,13 @@ context/
 │   ├── route-diff.py
 │   ├── update-tracks.py
 │   ├── check-reachability.py
+│   ├── check-hardening.py
 │   ├── daily-hygiene.py
 │   ├── harden-ledger.sh
 │   ├── record-agent.py
 │   └── context_utils.py
 ├── docs/                   # Auto-generated markdown (for humans)
+├── runtime-policy.md       # Sandbox/OS hardening guidance
 └── [project pages].html    # Domain-specific knowledge pages
 ```
 

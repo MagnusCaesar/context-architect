@@ -271,6 +271,9 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
     for script in list(scripts_src.glob("*.py")) + list(scripts_src.glob("*.sh")):
         if script.name != "bootstrap.py":  # Don't copy bootstrap into project
             shutil.copy2(script, scripts_dst / script.name)
+    runtime_policy = TEMPLATES_DIR / "runtime-policy.md"
+    if runtime_policy.exists():
+        shutil.copy2(runtime_policy, context_dir / "runtime-policy.md")
 
     # Generate config.json
     config_data = config or {
@@ -614,6 +617,7 @@ def main():
     print(f"  - {len(list(context_dir.glob('*.html')))} HTML pages")
     print(f"  - {len(list((context_dir / 'scripts').glob('*.py')))} scripts")
     print(f"  - config.json")
+    print(f"  - runtime-policy.md")
     if findings.get("doc_files"):
         print(f"  - doc import candidates: {len(doc_import_candidates(target, findings))} (use --absorb-docs to import)")
     if imported:
@@ -622,6 +626,7 @@ def main():
     print(f"  1. Review and fill stub pages with project-specific content")
     print(f"  2. Run: python context/scripts/validate.py")
     print(f"  3. Add to CLAUDE.md: see context/index.html for knowledge base")
+    print(f"  4. For real ledger hardening, have root/elevated/non-agent user run: context/scripts/harden-ledger.sh context")
 
 
 if __name__ == "__main__":
