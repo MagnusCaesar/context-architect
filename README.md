@@ -150,7 +150,7 @@ If the same agent can run `chattr -a`, `chmod`, or arbitrary writes to protected
 Validation:
 
 ```bash
-python3 /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" .
 python3 -m py_compile scripts/*.py
 bash smoke.sh
 git diff --check

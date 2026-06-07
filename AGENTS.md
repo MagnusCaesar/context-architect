@@ -69,7 +69,7 @@ for this framework's deterministic scripts or contracts.
 Run after meaningful changes:
 
 ```bash
-python3 /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" .
 bash smoke.sh
 git diff --check
 ```

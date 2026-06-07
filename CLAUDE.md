@@ -54,7 +54,7 @@ framework scripts or contracts.
 Run:
 
 ```bash
-python3 /home/vishnu_rajagopal/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" .
 bash smoke.sh
 git diff --check
 ```
