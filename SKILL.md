@@ -1,0 +1,130 @@
+---
+name: context-architecture
+description: Bootstrap and operate a map-first local context wiki for agent work. Deterministic scripts own all routine (locks, ledgers, validation, rendering). LLMs own only judgment calls (significance, routing, rationale).
+---
+
+Use when:
+- The user wants persistent project context, agent memory architecture, or multi-agent coordination
+- Starting a new project that needs structured documentation
+- An existing project needs a context system bootstrapped
+
+## Operating Principle
+
+**Scripts own ritual. LLMs own judgment.**
+
+| Script-owned (deterministic) | LLM-owned (judgment) |
+|------------------------------|---------------------|
+| Lock acquire/release | Is this fact durable? |
+| Ledger entry append | What does this decision mean? |
+| Diff-to-page routing via `tracks` | Which unmatched fact is durable? |
+| Spawn tree entries | Should this page be split? |
+| Validation (all invariants) | Is this context still accurate? |
+| Staleness detection | Task classification edge cases |
+| Doc generation | Summary wording |
+| Bootstrap skeleton creation | Content significance |
+
+## Write Discipline
+
+All writes must be surgical. Produce ONLY what was asked. No adjacent cleanup, no "while I'm here" improvements, no unsolicited additions. When an instruction is specific in approach or implementation, the output must contain exactly that and nothing else.
+
+## Workflow
+
+### Bootstrap (new project)
+```bash
+python ~/.claude/skills/context-architecture/scripts/bootstrap.py --target /path/to/project --scan
+```
+Scans repo, presents findings batch-style, asks targeted questions for ambiguities, generates full context/ skeleton.
+
+### Absorb Existing Docs
+When a project already has documentation (README, ANALYSIS.md, wiki exports, etc.), `bootstrap.py --scan` reports headed doc import candidates. Import is explicit and small:
+```bash
+python ~/.claude/skills/context-architecture/scripts/bootstrap.py --target /path/to/project --absorb-docs
+```
+This creates headed HTML pages, copies originals under `context/archived/`, and links pages into the index. Do not create pages from chat automatically.
+
+### Task Start
+```bash
+python context/scripts/start-task.py --page <page> --intent "<what you're doing>"
+```
+Classifies task, checks staleness, acquires lock if needed. Returns: task class + status.
+
+### Route Changed Files
+```bash
+python context/scripts/route-diff.py --files src/parser.py
+python context/scripts/route-diff.py --from HEAD~1 --to HEAD
+```
+Matches changed files to page-local `<meta name="tracks">`. Reports matched pages, unmatched files, and stale tracks. No semantic guessing.
+
+### Repair Tracks
+```bash
+python context/scripts/update-tracks.py --page parser.html --add src/parser.py --remove src/old_parser.py
+```
+Explicit orchestrator repair for stale or missing `tracks` metadata.
+
+### Reachability And Daily Hygiene
+```bash
+python context/scripts/check-reachability.py --json
+python context/scripts/daily-hygiene.py --json
+```
+Reachability checks whether live context pages are discoverable from the project bootloader/head page. Daily hygiene is normally hidden: the first non-hygiene ledger event each day runs it automatically and records a `daily_hygiene` event.
+
+### Task Close
+```bash
+python context/scripts/close-task.py --page <page> --summary "<what changed>"
+```
+Releases lock, appends ledger, bumps timestamp, validates, regenerates docs.
+
+### Validation (anytime)
+```bash
+python context/scripts/validate.py
+```
+
+## Verification (smoke test)
+
+```bash
+bash ~/.claude/skills/context-architecture/smoke.sh
+```
+
+Exercises full lifecycle and contract failures: bootstrap → lock contention → stale lock break → route/freshness → track repair → reachability/hygiene → decision validation → close validation warning → docs. Exit 0 = all pass. Run after any script change.
+
+## Task Classes
+
+- **Read-only**: No locks needed. Just read pages.
+- **Tiny write**: ≤5 changed lines, ≤2 files, no structural change. Lock acquired but minimal ceremony.
+- **Standard write**: Anything broader. Full lock + ledger + validation cycle.
+
+## Architecture (what gets generated)
+
+```
+context/
+├── index.html              # Map-first retrieval router
+├── control-plane.html      # Runtime checklist (read by scripts, not agents)
+├── ledger.html             # Active locks + history
+├── decisions.html          # Decision graph
+├── config.json             # Repo roots, settings, validator config
+├── scripts/                # Deterministic tools (copied from skill)
+│   ├── start-task.py
+│   ├── close-task.py
+│   ├── validate.py
+│   ├── generate-docs.py
+│   ├── check-freshness.py
+│   ├── route-diff.py
+│   ├── update-tracks.py
+│   ├── check-reachability.py
+│   ├── daily-hygiene.py
+│   └── context_utils.py
+├── docs/                   # Auto-generated markdown (for humans)
+└── [project pages].html    # Domain-specific knowledge pages
+```
+
+## Key Design Choices
+
+- HTML source of truth (semantic tags, meta for locks/routing, explicit hrefs)
+- Markdown auto-generated for human consumption
+- Max 200 lines per page
+- Discovery blocks via `<meta name="read-when">`, `<meta name="update-when">`, and page-local `<meta name="tracks">`
+- Ledger events are audit history; wiki/decision pages hold durable knowledge
+- New page only when no existing page owns topic, knowledge is durable, and a future read trigger exists
+- Decisions form a graph (`data-builds-on`, required rationale fields, optional `data-tracks`)
+- Lock arbitration: subagents self-manage, orchestrator arbitrates contention
+- Hooks enforce locks for subagents (advisory for orchestrator)

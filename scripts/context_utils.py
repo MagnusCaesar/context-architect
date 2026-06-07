@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""Shared helpers for context-architecture scripts."""
+
+from __future__ import annotations
+
+import fnmatch
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONTEXT_ONLY = "context-only"
+_HYGIENE_RUNNING = False
+
+
+def now_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_utc() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def find_context_root() -> Path | None:
+    cwd = Path.cwd()
+    for parent in [cwd] + list(cwd.parents):
+        if (parent / "context" / "index.html").exists():
+            return parent / "context"
+    if (cwd / "index.html").exists():
+        return cwd
+    return None
+
+
+def read_config(context_root: Path) -> dict:
+    path = context_root / "config.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def repo_root(context_root: Path) -> Path:
+    config = read_config(context_root)
+    roots = config.get("repoRoots", [])
+    if roots:
+        return Path(roots[0].get("path", str(context_root.parent))).resolve()
+    return context_root.parent.resolve()
+
+
+def read_meta(filepath: Path, name: str) -> str:
+    content = filepath.read_text(errors="replace")
+    match = re.search(rf'<meta\s+name="{re.escape(name)}"\s+content="([^"]*)"', content)
+    return html.unescape(match.group(1)) if match else ""
+
+
+def set_meta_in_content(content: str, name: str, value: str) -> str:
+    escaped = html.escape(value, quote=True)
+    pattern = rf'(<meta\s+name="{re.escape(name)}"\s+content=")[^"]*(")'
+    if re.search(pattern, content):
+        return re.sub(pattern, rf'\g<1>{escaped}\2', content, count=1)
+    insert = f'  <meta name="{name}" content="{escaped}">\n'
+    if "</head>" in content:
+        return content.replace("</head>", insert + "</head>", 1)
+    return insert + content
+
+
+def write_meta(filepath: Path, name: str, value: str, context_root: Path | None = None) -> None:
+    content = filepath.read_text(errors="replace")
+    write_atomic(filepath, set_meta_in_content(content, name, value), context_root=context_root)
+
+
+def write_atomic(path: Path, content: str, context_root: Path | None = None) -> None:
+    """Write by temp file in the same directory, then atomically replace."""
+    path = Path(path)
+    warn_dirty_target(path, context_root)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def warn_dirty_target(path: Path, context_root: Path | None = None) -> None:
+    root = None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            cwd=str(path.parent),
+            timeout=3,
+        )
+        if result.returncode == 0:
+            root = Path(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return
+    if not root:
+        return
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return
+    try:
+        status = subprocess.run(
+            ["git", "status", "--short", "--", str(rel)],
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+            timeout=3,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return
+    if status.returncode != 0 or not status.stdout.strip():
+        return
+    details = ""
+    if context_root:
+        latest = latest_ledger_event(context_root, page=path.name)
+        if latest:
+            details = f"; latest ledger event: {latest}"
+    print(f"WARNING: rewriting dirty target {path}{details}", file=sys.stderr)
+
+
+def parse_tracks(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def tracks_status(page_path: Path) -> dict:
+    raw = read_meta(page_path, "tracks")
+    tracks = parse_tracks(raw)
+    if not tracks:
+        return {"status": "untracked", "tracks": []}
+    if tracks == [CONTEXT_ONLY]:
+        return {"status": "context-only", "tracks": tracks}
+    if CONTEXT_ONLY in tracks:
+        return {"status": "malformed", "tracks": tracks, "reason": "context-only cannot be combined with file tracks"}
+    return {"status": "tracked", "tracks": tracks}
+
+
+def ignored(path: str, ignore_patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(path, pattern) for pattern in ignore_patterns)
+
+
+def match_tracks(files: list[str], tracks: list[str]) -> list[str]:
+    matched = []
+    for changed in files:
+        if any(changed == track or fnmatch.fnmatch(changed, track) for track in tracks):
+            matched.append(changed)
+    return matched
+
+
+def stale_tracks(tracks: list[str], root: Path, ignore_patterns: list[str] | None = None) -> list[str]:
+    ignore_patterns = ignore_patterns or []
+    stale = []
+    for track in tracks:
+        if track == CONTEXT_ONLY or ignored(track, ignore_patterns):
+            continue
+        if any(ch in track for ch in "*?["):
+            if not list(root.glob(track)):
+                stale.append(track)
+        elif not (root / track).exists():
+            stale.append(track)
+    return stale
+
+
+def ensure_ledger_events_section(content: str) -> str:
+    if '<section id="events">' in content:
+        return content
+    section = """\n    <section id="events">\n      <h2>Events</h2>\n      <table>\n        <thead>\n          <tr><th>Time</th><th>Event</th><th>Page</th><th>Agent</th><th>Status</th><th>Details</th></tr>\n        </thead>\n        <tbody>\n        </tbody>\n      </table>\n    </section>\n"""
+    if "</main>" in content:
+        return content.replace("</main>", section + "  </main>", 1)
+    return content + section
+
+
+def append_ledger_event(
+    context_root: Path,
+    event: str,
+    page: str,
+    agent: str,
+    status: str,
+    details: str = "",
+    extra_attrs: dict[str, str] | None = None,
+    trigger_hygiene: bool = True,
+) -> None:
+    ledger = context_root / "ledger.html"
+    if not ledger.exists():
+        return
+    if trigger_hygiene and event != "daily_hygiene":
+        maybe_run_daily_hygiene(context_root)
+    content = ensure_ledger_events_section(ledger.read_text(errors="replace"))
+    timestamp = now_utc()
+    attrs = {
+        "time": timestamp,
+        "event": event,
+        "page": page,
+        "agent": agent,
+        "status": status,
+    }
+    if extra_attrs:
+        attrs.update(extra_attrs)
+    attr_text = " ".join(f'data-{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items())
+    cells = "".join(
+        f"<td>{html.escape(value)}</td>"
+        for value in [timestamp, event, page, agent, status, details]
+    )
+    row = f"          <tr {attr_text}>{cells}</tr>\n"
+    pattern = r'(<section id="events">.*?<tbody>\n)(.*?)(\s*</tbody>)'
+    new_content, count = re.subn(pattern, rf"\1\2{row}\3", content, count=1, flags=re.S)
+    if count == 0:
+        new_content = content.replace("</tbody>", row + "        </tbody>", 1)
+    write_atomic(ledger, new_content, context_root=context_root)
+
+
+def latest_ledger_event(context_root: Path, page: str = "") -> str:
+    ledger = context_root / "ledger.html"
+    if not ledger.exists():
+        return ""
+    content = ledger.read_text(errors="replace")
+    rows = re.findall(r'<tr\b([^>]*)>(.*?)</tr>', content, flags=re.S)
+    for attrs, cells in reversed(rows):
+        if 'data-event=' not in attrs:
+            continue
+        page_match = re.search(r'data-page="([^"]*)"', attrs)
+        if page and page_match and page_match.group(1) != page:
+            continue
+        event = re.search(r'data-event="([^"]*)"', attrs)
+        status = re.search(r'data-status="([^"]*)"', attrs)
+        time = re.search(r'data-time="([^"]*)"', attrs)
+        if event:
+            return f"{time.group(1) if time else '?'} {event.group(1)} {status.group(1) if status else ''}".strip()
+    return ""
+
+
+def add_active_lock(context_root: Path, page: str, agent: str, purpose: str = "start-task") -> None:
+    ledger = context_root / "ledger.html"
+    if not ledger.exists():
+        return
+    content = ledger.read_text(errors="replace")
+    row = (
+        f'          <tr><td>{html.escape(page)}</td><td>{html.escape(agent)}</td>'
+        f'<td>{now_utc()}</td><td>{html.escape(purpose)}</td></tr>\n'
+    )
+    pattern = r'(<section id="active-locks">.*?<tbody>\n)(.*?)(\s*</tbody>)'
+    new_content, count = re.subn(pattern, rf"\1\2{row}\3", content, count=1, flags=re.S)
+    if count == 0:
+        new_content = content.replace("</tbody>", row + "        </tbody>", 1)
+    write_atomic(ledger, new_content, context_root=context_root)
+
+
+def remove_active_lock(context_root: Path, page: str, agent: str) -> None:
+    ledger = context_root / "ledger.html"
+    if not ledger.exists():
+        return
+    content = ledger.read_text(errors="replace")
+    pattern = rf'\s*<tr><td>{re.escape(html.escape(page))}</td><td>{re.escape(html.escape(agent))}</td>.*?</tr>\n?'
+    new_content = re.sub(pattern, "", content)
+    write_atomic(ledger, new_content, context_root=context_root)
+
+
+def validation_failure_summary(output: str, limit: int = 8) -> list[str]:
+    lines = [line.rstrip() for line in output.splitlines()]
+    failures = []
+    keep = False
+    for line in lines:
+        if line.startswith("FAIL:"):
+            keep = True
+            failures.append(line)
+            continue
+        if line.startswith("PASS:"):
+            keep = False
+        elif keep and line.strip().startswith("-"):
+            failures.append(line)
+        if len(failures) >= limit:
+            break
+    return failures
+
+
+def project_root(context_root: Path) -> Path:
+    return context_root.parent
+
+
+def rel_to_project(context_root: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(project_root(context_root).resolve()))
+    except ValueError:
+        return str(path)
+
+
+def live_context_pages(context_root: Path) -> set[str]:
+    pages = set()
+    for page in context_root.rglob("*.html"):
+        if "archived" in page.parts or "docs" in page.parts:
+            continue
+        pages.add(rel_to_project(context_root, page))
+    return pages
+
+
+def select_reachability_root(context_root: Path) -> tuple[Path, str, bool, str]:
+    root = project_root(context_root)
+    candidates = [
+        root / "AGENTS.md",
+        root / "CLAUDE.md",
+        root / ".agents" / "AGENTS.md",
+        context_root / "index.html",
+        context_root / "CONTEXT-MAP.html",
+        context_root / "CONTEXT-MAP.md",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            rel = rel_to_project(context_root, candidate)
+            return candidate, rel, rel.startswith("context/"), ""
+    fallback = context_root / "index.html"
+    return fallback, rel_to_project(context_root, fallback), True, "no bootloader root found"
+
+
+def _normalize_context_target(context_root: Path, source: Path, target: str) -> str | None:
+    target = target.strip()
+    if not target or target.startswith("#"):
+        return None
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target):
+        return None
+    base = source.parent
+    resolved = (base / target.split("#", 1)[0]).resolve()
+    try:
+        resolved.relative_to(context_root.resolve())
+    except ValueError:
+        return None
+    return rel_to_project(context_root, resolved)
+
+
+def _bootloader_edges(context_root: Path, root_file: Path) -> tuple[set[str], list[dict]]:
+    edges: set[str] = set()
+    broken = []
+    text = root_file.read_text(errors="replace")
+    for line in text.splitlines():
+        for match in re.findall(r"context/[A-Za-z0-9_./-]+\.(?:html|md)", line):
+            target = (project_root(context_root) / match).resolve()
+            rel = rel_to_project(context_root, target)
+            if target.exists():
+                edges.add(rel)
+            else:
+                broken.append({"from": rel_to_project(context_root, root_file), "to": rel})
+    return edges, broken
+
+
+def _html_edges(context_root: Path, page: Path) -> tuple[set[str], list[dict]]:
+    if page.name == "ledger.html":
+        return set(), []
+    content = page.read_text(errors="replace")
+    edges: set[str] = set()
+    broken = []
+    source_rel = rel_to_project(context_root, page)
+    for href in re.findall(r'href=["\']([^"\']+)["\']', content):
+        target_rel = _normalize_context_target(context_root, page, href)
+        if not target_rel:
+            continue
+        target_path = project_root(context_root) / target_rel
+        if target_path.exists():
+            if target_path.suffix == ".html":
+                edges.add(target_rel)
+        else:
+            broken.append({"from": source_rel, "to": target_rel})
+    return edges, broken
+
+
+def check_reachability(context_root: Path) -> dict:
+    live_pages = live_context_pages(context_root)
+    root_file, root_name, fallback_root, root_warning = select_reachability_root(context_root)
+    edges: dict[str, set[str]] = {}
+    broken_links: list[dict] = []
+
+    if root_name.startswith("context/") and root_file.suffix == ".html":
+        root_edges, root_broken = _html_edges(context_root, root_file)
+    else:
+        root_edges, root_broken = _bootloader_edges(context_root, root_file)
+    edges[root_name] = root_edges
+    broken_links.extend(root_broken)
+
+    for rel in sorted(live_pages):
+        page = project_root(context_root) / rel
+        page_edges, page_broken = _html_edges(context_root, page)
+        edges[rel] = page_edges
+        broken_links.extend(page_broken)
+
+    reachable = set()
+    parent: dict[str, str | None] = {root_name: None}
+    queue = [root_name]
+    while queue:
+        node = queue.pop(0)
+        if node in reachable:
+            continue
+        reachable.add(node)
+        for nxt in sorted(edges.get(node, set())):
+            if nxt not in parent:
+                parent[nxt] = node
+            if nxt not in reachable:
+                queue.append(nxt)
+
+    orphans = sorted(live_pages - reachable)
+    paths = {}
+    for page in sorted(reachable & live_pages):
+        cur = page
+        chain = [cur]
+        while parent.get(cur):
+            cur = parent[cur]  # type: ignore[assignment]
+            chain.append(cur)
+        paths[page] = list(reversed(chain))
+
+    status = "ok"
+    if broken_links:
+        status = "warning"
+    if orphans:
+        status = "orphans_found"
+    if root_warning and status == "ok":
+        status = "warning"
+
+    handoff = None
+    if orphans or broken_links:
+        handoff = {
+            "type": "context_hygiene_request",
+            "reason": "unreachable context pages or broken links found",
+            "candidates": [
+                {
+                    "path": path,
+                    "recommended_actions": ["link_existing", "merge_into_page", "archive_candidate", "keep_with_reason"],
+                }
+                for path in orphans
+            ],
+            "broken_links": broken_links,
+        }
+
+    return {
+        "status": status,
+        "root": root_name,
+        "fallback_root": fallback_root,
+        "root_warning": root_warning,
+        "reachable": sorted(reachable & live_pages),
+        "paths": paths,
+        "orphans": orphans,
+        "broken_links": broken_links,
+        "handoff_request": handoff,
+    }
+
+
+def daily_hygiene_ran_today(context_root: Path) -> bool:
+    ledger = context_root / "ledger.html"
+    if not ledger.exists():
+        return False
+    today = datetime.now().date()
+    content = ledger.read_text(errors="replace")
+    for attrs, _body in re.findall(r'<tr\b([^>]*)>(.*?)</tr>', content, flags=re.S):
+        if 'data-event="daily_hygiene"' in attrs:
+            m = re.search(r'data-time="([^"]*)"', attrs)
+            if not m:
+                continue
+            raw_time = m.group(1)
+            try:
+                event_time = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+                if event_time.astimezone().date() == today:
+                    return True
+            except ValueError:
+                if raw_time.startswith(today.isoformat()):
+                    return True
+    return False
+
+
+def run_daily_hygiene(context_root: Path, append_event: bool = True) -> dict:
+    if daily_hygiene_ran_today(context_root):
+        return {"status": "skipped", "reason": "already_ran_today"}
+    result = check_reachability(context_root)
+    broken = len(result.get("broken_links", []))
+    orphans = len(result.get("orphans", []))
+    fallback = bool(result.get("fallback_root"))
+    status = "ok"
+    if broken:
+        status = "critical"
+    elif orphans or fallback:
+        status = "warning"
+    details = f"orphans={orphans} broken_links={broken} fallback_root={str(fallback).lower()}"
+    if append_event:
+        extra = {}
+        if result.get("handoff_request"):
+            extra["handoff"] = "context_hygiene_request"
+        append_ledger_event(
+            context_root,
+            "daily_hygiene",
+            "context",
+            "system",
+            status,
+            details,
+            extra_attrs=extra,
+            trigger_hygiene=False,
+        )
+    return {"status": status, "reachability": result}
+
+
+def maybe_run_daily_hygiene(context_root: Path) -> None:
+    global _HYGIENE_RUNNING
+    if _HYGIENE_RUNNING or daily_hygiene_ran_today(context_root):
+        return
+    _HYGIENE_RUNNING = True
+    try:
+        run_daily_hygiene(context_root, append_event=True)
+    finally:
+        _HYGIENE_RUNNING = False

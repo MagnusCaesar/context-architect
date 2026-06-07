@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Close a context task: release lock, validate, regenerate docs."""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from context_utils import (
+    append_ledger_event,
+    find_context_root,
+    now_utc,
+    read_meta,
+    remove_active_lock,
+    set_meta_in_content,
+    validation_failure_summary,
+    write_atomic,
+)
+
+
+def release_lock(context_root: Path, page: str, agent_id: str) -> dict:
+    page_path = context_root / page
+    if not page_path.exists():
+        result = {"status": "release_denied_wrong_owner", "released": False, "reason": f"{page} does not exist"}
+        append_ledger_event(context_root, "release", page, agent_id, result["status"], result["reason"])
+        return result
+
+    current_lock = read_meta(page_path, "locked")
+    if current_lock != "true":
+        result = {"status": "released", "released": True, "reason": "was not locked"}
+        append_ledger_event(context_root, "release", page, agent_id, result["status"], result["reason"])
+        return result
+
+    locked_by = read_meta(page_path, "locked-by")
+    if locked_by and locked_by != agent_id:
+        result = {
+            "status": "release_denied_wrong_owner",
+            "released": False,
+            "reason": f"locked by {locked_by}, not {agent_id}",
+        }
+        append_ledger_event(context_root, "release", page, agent_id, result["status"], result["reason"])
+        return result
+
+    content = page_path.read_text(errors="replace")
+    content = set_meta_in_content(content, "locked", "false")
+    content = set_meta_in_content(content, "locked-by", "")
+    content = set_meta_in_content(content, "locked-at", "")
+    content = set_meta_in_content(content, "updated", now_utc()[:10])
+    content = set_meta_in_content(content, "reviewed-at", now_utc())
+    write_atomic(page_path, content, context_root=context_root)
+    remove_active_lock(context_root, page, agent_id)
+
+    result = {"status": "released", "released": True}
+    append_ledger_event(context_root, "release", page, agent_id, result["status"], "lock released")
+    return result
+
+
+def run_validate(context_root: Path) -> dict:
+    validate_script = context_root / "scripts" / "validate.py"
+    if not validate_script.exists():
+        validate_script = context_root / "validate.py"
+    if not validate_script.exists():
+        return {"ran": False, "reason": "validate.py not found"}
+    try:
+        result = subprocess.run(
+            [sys.executable, str(validate_script)],
+            capture_output=True,
+            text=True,
+            cwd=str(context_root.parent),
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ran": True, "passed": False, "output": "timeout", "failures": ["timeout"]}
+    except Exception as e:
+        return {"ran": False, "reason": str(e)}
+
+    output = result.stdout.strip()
+    passed = result.returncode == 0
+    return {
+        "ran": True,
+        "passed": passed,
+        "output": output[-1000:] if output else "",
+        "errors": result.stderr.strip()[-300:] if result.stderr else "",
+        "failures": validation_failure_summary(output) if not passed else [],
+    }
+
+
+def run_generate_docs(context_root: Path) -> dict:
+    gen_script = context_root / "scripts" / "generate-docs.py"
+    if not gen_script.exists():
+        gen_script = context_root / "generate-docs.py"
+    if not gen_script.exists():
+        return {"ran": False, "reason": "generate-docs.py not found"}
+    try:
+        result = subprocess.run(
+            [sys.executable, str(gen_script)],
+            capture_output=True,
+            text=True,
+            cwd=str(context_root.parent),
+            timeout=30,
+        )
+        return {
+            "ran": True,
+            "success": result.returncode == 0,
+            "output": result.stdout.strip() if result.stdout else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {"ran": True, "success": False, "output": "timeout"}
+    except Exception as e:
+        return {"ran": False, "reason": str(e)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Close a context task")
+    parser.add_argument("--page", required=True, help="Target page (e.g., parser.html)")
+    parser.add_argument("--summary", required=True, help="What changed")
+    parser.add_argument("--agent-id", default=os.environ.get("AGENT_ID", "orchestrator"))
+    parser.add_argument("--skip-validate", action="store_true", help="Skip validation step")
+    parser.add_argument("--skip-docs", action="store_true", help="Skip doc regeneration")
+    args = parser.parse_args()
+
+    context_root = find_context_root()
+    if not context_root:
+        print(json.dumps({"error": "No context/ directory found"}))
+        sys.exit(1)
+
+    lock_result = release_lock(context_root, args.page, args.agent_id)
+
+    validate_result = {"ran": False, "reason": "skipped"}
+    if not args.skip_validate:
+        validate_result = run_validate(context_root)
+
+    docs_result = {"ran": False, "reason": "skipped"}
+    if not args.skip_docs:
+        docs_result = run_generate_docs(context_root)
+
+    if not lock_result.get("released"):
+        status = "release_denied_wrong_owner"
+        instruction = f"Lock release failed: {lock_result.get('reason')}"
+    elif not validate_result.get("passed", True):
+        status = "validation_warning"
+        instruction = "Task closed but validation failed. Fix listed failures."
+        append_ledger_event(
+            context_root,
+            "close_validation",
+            args.page,
+            args.agent_id,
+            status,
+            "; ".join(validate_result.get("failures", [])[:3]),
+        )
+    else:
+        status = "released"
+        instruction = "Task closed."
+
+    result = {
+        "status": status,
+        "page": args.page,
+        "summary": args.summary,
+        "lock_released": lock_result,
+        "validation": validate_result,
+        "docs_generated": docs_result,
+        "instruction": instruction,
+    }
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

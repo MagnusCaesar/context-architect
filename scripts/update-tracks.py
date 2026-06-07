@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Explicit orchestrator repair for page-local tracks metadata."""
+
+import argparse
+import json
+import os
+import sys
+
+from context_utils import (
+    append_ledger_event,
+    find_context_root,
+    parse_tracks,
+    read_meta,
+    set_meta_in_content,
+    write_atomic,
+)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Update a page's tracks meta")
+    parser.add_argument("--page", required=True, help="Context page, e.g. parser.html")
+    parser.add_argument("--add", action="append", default=[], help="Track to add; can be repeated")
+    parser.add_argument("--remove", action="append", default=[], help="Track to remove; can be repeated")
+    parser.add_argument("--agent-id", default=os.environ.get("AGENT_ID", "orchestrator"))
+    args = parser.parse_args()
+
+    context_root = find_context_root()
+    if not context_root:
+        print(json.dumps({"error": "No context/ directory found"}))
+        sys.exit(1)
+    page_path = context_root / args.page
+    if not page_path.exists():
+        print(json.dumps({"error": f"{args.page} does not exist"}))
+        sys.exit(1)
+
+    tracks = parse_tracks(read_meta(page_path, "tracks"))
+    if args.add and tracks == ["context-only"] and any(item != "context-only" for item in args.add):
+        tracks = []
+    tracks = [track for track in tracks if track not in set(args.remove)]
+    if "context-only" in args.add:
+        tracks = ["context-only"]
+        args.add = ["context-only"]
+        args.remove = []
+    for track in args.add:
+        if track not in tracks:
+            tracks.append(track)
+    content = page_path.read_text(errors="replace")
+    new_tracks = ", ".join(tracks)
+    content = set_meta_in_content(content, "tracks", new_tracks)
+    write_atomic(page_path, content, context_root=context_root)
+    append_ledger_event(
+        context_root,
+        "track_update",
+        args.page,
+        args.agent_id,
+        "updated",
+        f"add={','.join(args.add)} remove={','.join(args.remove)}",
+    )
+    print(json.dumps({
+        "status": "updated",
+        "page": args.page,
+        "tracks": tracks,
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()
