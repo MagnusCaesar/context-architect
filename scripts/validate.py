@@ -14,7 +14,7 @@ from context_utils import check_reachability, find_context_root, ledger_render_l
 
 def html_files(context_root: Path):
     for html_file in sorted(context_root.rglob("*.html")):
-        if "archived" in html_file.parts or "docs" in html_file.parts:
+        if "docs" in html_file.parts:
             continue
         yield html_file
 
@@ -74,26 +74,88 @@ def check_index_coverage(context_root: Path):
 def check_decision_graph(context_root: Path):
     failures = []
     required_terms = {"Question", "Decision", "Rationale", "Consequences", "Review when"}
-    decision_ids = set()
+    current_statuses = {"accepted", "implemented"}
+    non_current_statuses = {"superseded", "deprecated", "rejected"}
+    allowed_statuses = {"proposed", "accepted", "implemented", "superseded", "deprecated", "rejected"}
+    decision_statuses = {}
+    decision_locations = {}
+
     for html_file in html_files(context_root):
         content = html_file.read_text(errors="replace")
-        decision_ids.update(re.findall(r'id="(dec-\d+)"', content))
+        meta_decision_id = read_meta(html_file, "decision-id")
+        if meta_decision_id:
+            decision_statuses[meta_decision_id] = read_meta(html_file, "status")
+            decision_locations[meta_decision_id] = html_file.name
+        elif html_file.parent.name == "decisions" and html_file.stem.startswith("dec-"):
+            decision_statuses[html_file.stem] = read_meta(html_file, "status")
+            decision_locations[html_file.stem] = html_file.name
         for attrs, article_body in re.findall(r'<article\b([^>]*)>(.*?)</article>', content, flags=re.S):
             if not re.search(r'class="[^"]*\bdecision\b[^"]*"', attrs):
                 continue
             id_match = re.search(r'id="([^"]+)"', attrs)
             decision_id = id_match.group(1) if id_match else f"{html_file.name}:unknown"
-            if 'data-status="' not in attrs:
+            status_match = re.search(r'data-status="([^"]+)"', attrs)
+            if not status_match:
                 failures.append(f"{html_file.name}: {decision_id} missing data-status")
+            else:
+                decision_statuses[decision_id] = status_match.group(1)
+                decision_locations[decision_id] = html_file.name
             terms = set(re.findall(r'<dt>\s*([^<]+?)\s*</dt>', article_body, flags=re.S))
             for required in sorted(required_terms - terms):
                 failures.append(f"{html_file.name}: {decision_id} missing decision field '{required}'")
+
+    decision_ids = set(decision_statuses)
+    for decision_id, status in decision_statuses.items():
+        location = decision_locations.get(decision_id, decision_id)
+        if not status:
+            failures.append(f"{location}: {decision_id} missing status")
+            continue
+        if status not in allowed_statuses:
+            failures.append(f"{location}: {decision_id} invalid status '{status}'")
+        path = context_root / "decisions" / f"{decision_id}.html"
+        if path.exists():
+            content = path.read_text(errors="replace")
+            if status == "implemented" and not read_meta(path, "commits"):
+                failures.append(f"{path.name}: implemented decision missing commits meta")
+            if status in non_current_statuses and 'id="rationale"' not in content:
+                failures.append(f"{path.name}: {status} decision missing rationale section")
+    superseded_refs = set()
     for html_file in html_files(context_root):
         content = html_file.read_text(errors="replace")
+        refs_by_edge = {}
+        for edge in ["builds-on", "related", "supersedes"]:
+            values = []
+            meta_value = read_meta(html_file, edge)
+            if meta_value:
+                values.append(meta_value)
+            values.extend(match.group(1) for match in re.finditer(rf'data-{edge}="([^"]+)"', content))
+            refs_by_edge[edge] = [
+                ref.strip()
+                for value in values
+                for ref in value.split(",")
+                if ref.strip()
+            ]
+        for ref in refs_by_edge["builds-on"]:
+            if ref not in decision_ids:
+                failures.append(f"{html_file.name}: builds-on references unknown '{ref}'")
+                continue
+            status = read_meta(html_file, "status")
+            if status in current_statuses and decision_statuses.get(ref) == "proposed":
+                failures.append(f"{html_file.name}: current decision builds on proposed '{ref}'")
+        for edge in ["related", "supersedes"]:
+            for ref in refs_by_edge[edge]:
+                if ref and ref not in decision_ids:
+                    failures.append(f"{html_file.name}: {edge} references unknown '{ref}'")
+                elif edge == "supersedes":
+                    superseded_refs.add(ref)
         for match in re.finditer(r'data-builds-on="([^"]+)"', content):
             for ref in [r.strip() for r in match.group(1).split(",")]:
                 if ref and ref not in decision_ids:
                     failures.append(f"{html_file.name}: data-builds-on references unknown '{ref}'")
+    for decision_id, status in decision_statuses.items():
+        if status == "superseded" and decision_id not in superseded_refs:
+            location = decision_locations.get(decision_id, decision_id)
+            failures.append(f"{location}: superseded decision has no replacement supersedes edge")
     return failures
 
 
@@ -159,6 +221,13 @@ def check_tracks(context_root: Path):
         tracking = tracks_status(html_file)
         if tracking["status"] == "malformed":
             failures.append(f"{html_file.name}: malformed tracks: {tracking['reason']}")
+        if read_meta(html_file, "kind") == "module-map":
+            if not read_meta(html_file, "read-when"):
+                failures.append(f"{html_file.name}: module-map missing read-when")
+            if not read_meta(html_file, "update-when"):
+                failures.append(f"{html_file.name}: module-map missing update-when")
+            if tracking["status"] == "untracked":
+                failures.append(f"{html_file.name}: module-map missing tracks or context-only")
     return failures
 
 
@@ -295,7 +364,7 @@ def check_agent_tree(context_root: Path):
             key: html.unescape(value)
             for key, value in re.findall(r'data-([A-Za-z0-9_-]+)="([^"]*)"', attrs)
         }
-        for key in ["time", "agent", "parent", "role", "task", "page", "status", "details"]:
+        for key in ["time", "agent", "parent", "role", "task", "page", "scope", "expected-actions", "status", "details"]:
             if key not in parsed:
                 failures.append(f"agent-tree.html: agent row missing data-{key}")
         agent = parsed.get("agent", "")
@@ -308,8 +377,8 @@ def check_agent_tree(context_root: Path):
         if parsed.get("status") and parsed["status"] not in statuses:
             failures.append(f"agent-tree.html: invalid status {parsed['status']}")
         cells = re.findall(r'<td>.*?</td>', body, flags=re.S)
-        if len(cells) != 8:
-            failures.append("agent-tree.html: agent row must have 8 cells")
+        if len(cells) != 10:
+            failures.append("agent-tree.html: agent row must have 10 cells")
     return failures
 
 

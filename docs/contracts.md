@@ -15,6 +15,9 @@ justified.
 | `check-freshness.py` | JSON `status`: `fresh`, `stale`, `untracked`, `unknown`, `error`. `unknown` means git/source state could not be proven. |
 | `route-diff.py` | JSON top-level keys: `matched_pages`, `affected_decisions`, `unmatched_files`, `stale_tracks`, `untracked_pages`; may return `status: error` on fatal input/git failures. |
 | `update-tracks.py` | JSON `status`: `updated`, `unchanged`, `error`; mutating calls may return `permission_denied`. |
+| `check-failure-todos.py` | JSON `status`: `clear`, `blocked_related_failure`, `warning_unscoped_failures`, `error`; blocking uses explicit `affects` scope only. |
+| `check-commit-context.py` | JSON `status`: `ok`, `needs_review`, `unknown`, `error`; reports git-backed recognized range metadata, affected pages/decisions, and handoff requests. |
+| `source-claim.py` | JSON `status`: `acquired`, `blocked_overlap`, `released`, `release_denied_wrong_owner`, `not_found`, `clear`, `ok`, `error`; for multi-agent/delegated source edits only. |
 | `check-reachability.py` | JSON `status`: `ok`, `warning`, `orphans_found`; broken links are reported as `warning` here and escalated by `validate.py`. |
 | `daily-hygiene.py` | JSON `status`: `ok`, `warning`, `critical`, `skipped`, `error`. |
 | `record-agent.py` | JSON `status`: `recorded`, `permission_denied`, `error`. |
@@ -45,6 +48,9 @@ Rules:
   repo-source freshness owner.
 - Empty or missing `tracks` means `untracked`; scripts must not fall back to
   scanning the whole repo.
+- `kind="module-map"` marks an ordinary context page as a subsystem map. Such
+  pages must include `read-when`, `update-when`, and `tracks` or explicit
+  `context-only`.
 
 `reviewed-at` is an optional UTC timestamp updated by `close-task.py` after a
 successful task close:
@@ -62,8 +68,8 @@ one JSON object with:
 
 Optional event attributes live under `extra_attrs`.
 
-`ledger.html` keeps the current active-lock table and renders a bounded recent
-window from `ledger-events.ndjson`:
+`ledger.html` keeps current active locks, current active source claims, and a
+bounded recent window from `ledger-events.ndjson`:
 
 ```html
 <section id="events">
@@ -79,6 +85,11 @@ deterministically.
 `ledgerRenderLimit` in `config.json` bounds rendered rows in `ledger.html` so
 the context page does not grow without limit. The NDJSON log may keep full audit
 history.
+
+Source claims are current-state rows in `ledger.html` plus audit events in
+`ledger-events.ndjson`. They are used only for multi-agent or delegated source
+edits. Exclusive mode is the only V1 mode. No V1 TTL policy is hardcoded. Force
+release requires orchestrator or explicit human permission and a ledger event.
 
 The first non-`daily_hygiene` ledger event of a local day silently runs daily
 hygiene before appending the requested event. Hygiene appends exactly one
@@ -109,10 +120,10 @@ Root priority:
 4. `context/index.html`
 5. future context-map aliases
 
-The checker inventories live `context/**/*.html`, excluding `context/archived/**`
-and `context/docs/**`, then uses BFS over bootloader context references and
-internal HTML links. `tracks`, ledger events, and decision refs are not
-reachability edges.
+The checker inventories live `context/**/*.html`, excluding generated human
+docs, then uses BFS over bootloader context references and internal HTML links.
+Archived node pages remain reachable through their subsystem archive index.
+`tracks`, ledger events, and decision refs are not reachability edges.
 
 Broken internal links are reported as `warning` by `check-reachability.py` and
 escalated to validation failure by `validate.py`. Orphans and fallback roots are
@@ -121,13 +132,15 @@ warnings in V1.
 ## Agent Tree
 
 `agent-tree.html` is advisory coordination, not lock authority. It helps agents
-see active subagent work before escalating to the orchestrator. Lock authority
-remains page lock metas plus the ledger active-lock table.
+see active subagent work before escalating to the orchestrator. Lock/claim
+authority remains page lock metas plus the ledger active-lock and active
+source-claim tables.
 
 `record-agent.py` upserts one row per `agent-id` and renders a tree from
 `parent-id`. Inputs:
 
-`agent-id`, `parent-id`, `role`, `task`, `page`, `status`, `details`
+`agent-id`, `parent-id`, `role`, `task`, `page`, `scope`,
+`expected-actions`, `status`, `details`
 
 Statuses:
 
@@ -163,8 +176,39 @@ explicit agent IDs to mutating roles.
 
 ## Decision Graph
 
-Decision entries are durable rationale, not event history. Each decision article
-must include `data-status` and these fields:
+Decision entries are durable rationale, not event history.
+
+`context/decisions.html` is the graph router. Individual decision nodes live
+under `context/decisions/`. Archived decision nodes live under
+`context/decisions/archived/` and remain reachable through
+`context/decisions/archive.html`.
+
+Decision ids use sequential plus slug form, for example
+`dec-001-human-docs-projection`. Decision graph edge metadata:
+
+- `builds-on`
+- `related`
+- `supersedes`
+- `resolves`
+- `affects`
+
+Backlinks are generated by scripts from outgoing edges; agents edit outgoing
+edges only.
+
+Status values:
+
+- `proposed`: not authority.
+- `accepted`: authority, may not have code yet.
+- `implemented`: authority with code; requires `commits`.
+- `superseded`: replaced by a newer decision.
+- `deprecated`: retained for rationale, no replacement required.
+- `rejected`: explicitly not chosen.
+
+Accepted or implemented decisions must not build on proposed decisions. If a
+task depends on a proposed decision, the agent asks the orchestrator/user to
+resolve it first.
+
+Legacy decision articles must include `data-status` and these fields:
 
 - `Question`
 - `Decision`
@@ -176,6 +220,65 @@ Optional attributes:
 
 - `data-builds-on`
 - `data-tracks`
+
+## Failure Todos
+
+`context/failure-todos.html` is the failure router. Individual failure nodes
+live under `context/failure-todos/`. Archived failure nodes live under
+`context/failure-todos/archived/` and remain reachable through
+`context/failure-todos/archive.html`.
+
+Failure ids use sequential plus slug form, for example
+`failure-001-route-diff-broken-glob`.
+
+Blocking is scoped. `affects` controls deterministic blocking; `topics` is for
+search and human review only. Unscoped failures are allowed and never block
+task completion.
+
+Statuses:
+
+- `open`: unresolved; blocks only when task scope intersects `affects`.
+- `authorized`: allowed to proceed; warns when related.
+- `blocked`: needs external input/tool/access; blocks related work.
+- `resolved`: fixed or no longer reproducible.
+- `deprecated`: retained for history; requires rationale.
+
+Repair attempts are counted globally per failure id from ledger events. After
+two failed attempts, agents stop speculative patching and report
+`needs_orchestrator_trace`.
+
+## Open Questions
+
+`context/open-questions.html` is the question router. Individual question nodes
+live under `context/open-questions/`. Answered questions are archived under
+`context/open-questions/archived/` and remain reachable through
+`context/open-questions/archive.html`.
+
+Question ids use sequential plus slug form, for example
+`question-001-routing-staleness`.
+
+Open questions block only when `blocking=true` and current task scope intersects
+`affects`, or when current task is listed in `blocked-work`. Durable answers
+should become decision nodes; answered question nodes point to `answered-by`.
+
+## Run Intent And Runbooks
+
+`context/run-intent.html` is a router only. It maps execution intent to a
+runbook and expected result category. It does not execute commands.
+
+Command details live in `context/runbooks/*.html` as mini skill/how-to pages.
+Use one runbook per stable workflow. Split a runbook only when it exceeds page
+limits or has multiple distinct workflow lanes.
+
+## Recognized Commits
+
+`context/recognized-commits.html` stores range-first metadata over real git
+history. Git is the commit source of truth; context stores only recognized
+ranges, heads, short rationale, and links to affected context nodes.
+
+Individual nodes may carry `commits` metadata when a commit directly
+implements, updates, resolves, or authorizes that node. Unrecognized commits
+produce handoff JSON for orchestrator delegation; scripts do not spawn agents.
 
 ## Memory Boundary
 

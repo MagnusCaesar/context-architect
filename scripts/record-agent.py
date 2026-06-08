@@ -21,7 +21,18 @@ from context_utils import (
 )
 
 
-FIELDS = ["time", "agent", "parent", "role", "task", "page", "status", "details"]
+FIELDS = [
+    "time",
+    "agent",
+    "parent",
+    "role",
+    "task",
+    "page",
+    "scope",
+    "expected-actions",
+    "status",
+    "details",
+]
 LEDGER_STATUSES = {"spawned", "blocked", "handoff", "closed"}
 
 
@@ -72,6 +83,7 @@ def tree_html(records: dict) -> str:
             f'<span data-status="{html.escape(record.get("status", ""), quote=True)}">{html.escape(record.get("status", ""))}</span> '
             f'<span>{html.escape(record.get("role", ""))}</span> '
             f'<code>{html.escape(record.get("page", ""))}</code> '
+            f'<code>{html.escape(record.get("scope", ""))}</code> '
             f'{html.escape(record.get("task", ""))}'
         )
         kids = sorted(children.get(agent, []))
@@ -110,6 +122,8 @@ def main():
     parser.add_argument("--role", default="")
     parser.add_argument("--task", default="")
     parser.add_argument("--page", default="")
+    parser.add_argument("--scope", default="")
+    parser.add_argument("--expected-actions", default="")
     parser.add_argument("--status", choices=["spawned", "active", "blocked", "handoff", "closed"], required=True)
     parser.add_argument("--details", default="")
     parser.add_argument("--actor-id", default=os.environ.get("AGENT_ID", ""))
@@ -141,6 +155,8 @@ def main():
         "role": args.role or previous.get("role", ""),
         "task": args.task or previous.get("task", ""),
         "page": args.page or previous.get("page", ""),
+        "scope": args.scope or previous.get("scope", ""),
+        "expected-actions": args.expected_actions or previous.get("expected-actions", ""),
         "status": args.status,
         "details": args.details,
     }
@@ -155,7 +171,11 @@ def main():
             args.page or "agent-tree.html",
             actor_id,
             args.status,
-            f"agent={args.agent_id} parent={args.parent_id} role={args.role} task={args.task} details={args.details}",
+            (
+                f"agent={args.agent_id} parent={args.parent_id} role={args.role} "
+                f"task={args.task} scope={args.scope} "
+                f"expected_actions={args.expected_actions} details={args.details}"
+            ),
         )
 
     print(json.dumps({

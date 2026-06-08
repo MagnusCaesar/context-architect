@@ -128,9 +128,18 @@ context/
 ├── index.html              # Map-first retrieval router
 ├── control-plane.html      # Runtime checklist
 ├── ledger-events.ndjson    # Append-only event source
-├── ledger.html             # Active locks + rendered event view
+├── ledger.html             # Active locks/source claims + rendered event view
 ├── agent-tree.html         # Advisory active agent subtree
-├── decisions.html          # Decision graph
+├── decisions.html          # Decision graph router
+├── decisions/              # One-file-per-decision nodes + archive
+├── failure-todos.html      # Scoped failure router
+├── failure-todos/          # One-file-per-failure nodes + archive
+├── open-questions.html     # Unresolved question router
+├── open-questions/         # One-file-per-question nodes + archive
+├── recognized-commits.html # Git range/context sync metadata
+├── reproducibility.html    # Setup/env/path facts
+├── run-intent.html         # Intent-to-runbook router
+├── runbooks/               # Mini skill/how-to command pages
 ├── config.json             # Repo roots, settings, validator config
 ├── scripts/                # Deterministic tools (copied from skill)
 │   ├── start-task.py
@@ -140,6 +149,9 @@ context/
 │   ├── check-freshness.py
 │   ├── route-diff.py
 │   ├── update-tracks.py
+│   ├── check-failure-todos.py
+│   ├── check-commit-context.py
+│   ├── source-claim.py
 │   ├── check-reachability.py
 │   ├── check-hardening.py
 │   ├── daily-hygiene.py
@@ -147,22 +159,24 @@ context/
 │   ├── record-agent.py
 │   └── context_utils.py
 ├── hooks/                  # Optional runtime hooks
-├── docs/                   # Auto-generated markdown (for humans)
 ├── archived/               # Copies of absorbed docs
 ├── runtime-policy.md       # Sandbox/OS hardening guidance
 └── [project pages].html    # Domain-specific knowledge pages
+docs/
+└── context/                # Human-facing projection generated from context
 ```
 
 ## Key Design Choices
 
 - HTML source of truth (semantic tags, meta for locks/routing, explicit hrefs)
-- Markdown auto-generated for human consumption
+- Human docs under `docs/context/` are generated projections from context
 - Max 200 lines per page
 - Discovery blocks via `<meta name="read-when">`, `<meta name="update-when">`, and page-local `<meta name="tracks">`
-- `ledger-events.ndjson` is append-only audit; `ledger.html` is a bounded view; wiki/decision pages hold durable knowledge
+- `ledger-events.ndjson` is append-only audit; `ledger.html` is a bounded active-lock/source-claim view; wiki/decision pages hold durable knowledge
 - `agent-tree.html` is advisory coordination; locks remain page metas plus ledger active locks
+- Source claims are ledger-backed coordination for multi-agent/delegated source edits only
 - Permission profile defaults live in `templates/permission-profiles.json`; skill frontmatter points to that template, bootstrap seeds config, and scripts enforce generated `context/config.json`
 - New page only when no existing page owns topic, knowledge is durable, and a future read trigger exists
-- Decisions form a graph (`data-builds-on`, required rationale fields, optional `data-tracks`)
+- Decisions form a graph (`builds-on`, `related`, `supersedes`, `resolves`, `affects`)
 - Lock arbitration: subagents self-manage, orchestrator arbitrates contention
 - Hooks are optional/advisory unless installed and verified in the active runtime

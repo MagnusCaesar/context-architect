@@ -54,19 +54,29 @@ context/
 ├── index.html              # Map-first retrieval router
 ├── control-plane.html      # Runtime checklist
 ├── ledger-events.ndjson    # Append-only event source
-├── ledger.html             # Active locks + bounded event view
+├── ledger.html             # Active locks/source claims + bounded event view
 ├── agent-tree.html         # Advisory active agent subtree
-├── decisions.html          # Decision graph and rationale
+├── decisions.html          # Decision graph router
+├── decisions/              # One-file-per-decision nodes + archive
+├── failure-todos.html      # Scoped failure router
+├── failure-todos/          # One-file-per-failure nodes + archive
+├── open-questions.html     # Unresolved question router
+├── open-questions/         # One-file-per-question nodes + archive
+├── recognized-commits.html # Git range/context sync metadata
+├── reproducibility.html    # Setup/env/path facts
+├── run-intent.html         # Intent-to-runbook router
+├── runbooks/               # Mini skill/how-to command pages
 ├── config.json             # Repo roots, roles, validator settings
 ├── scripts/                # Deterministic tools copied from this repo
 ├── hooks/                  # Optional runtime hooks
-├── docs/                   # Generated Markdown views
 ├── archived/               # Copies of absorbed docs
 ├── runtime-policy.md       # OS/sandbox hardening guidance
 └── *.html                  # Project context pages
+docs/
+└── context/                # Generated human-facing projection
 ```
 
-The HTML files are the source of truth. Markdown under `context/docs/` is generated for humans.
+The HTML files are the source of truth. Markdown under `docs/context/` is generated for humans.
 
 Boundary with context-mode:
 

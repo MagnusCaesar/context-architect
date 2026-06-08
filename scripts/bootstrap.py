@@ -34,6 +34,28 @@ from context_utils import resolve_context_page, today_utc, write_atomic
 
 SKILL_ROOT = Path(__file__).parent.parent
 TEMPLATES_DIR = SKILL_ROOT / "templates"
+BOOTLOADER_TEMPLATE = TEMPLATES_DIR / "bootloader-block.md"
+
+CORE_PAGES = [
+    {"name": "index.html", "purpose": "Root entry point and page map", "auto": True},
+    {"name": "control-plane.html", "purpose": "Runtime workflow checklist", "auto": True},
+    {"name": "ledger.html", "purpose": "Concurrency locks, source claims, and history", "auto": True},
+    {"name": "agent-tree.html", "purpose": "Advisory agent coordination tree", "auto": True},
+    {"name": "decisions.html", "purpose": "Decision graph and rationale", "auto": True},
+    {"name": "failure-todos.html", "purpose": "Scoped unresolved failures and repair routing", "auto": True},
+    {"name": "open-questions.html", "purpose": "Unresolved assumptions and blocking questions", "auto": True},
+    {"name": "reproducibility.html", "purpose": "Setup, tools, environment, and artifact paths", "auto": True},
+    {"name": "run-intent.html", "purpose": "Router from intent to runbooks and expected outcomes", "auto": True},
+    {"name": "recognized-commits.html", "purpose": "Recognized git ranges and context sync state", "auto": True},
+]
+
+CORE_PAGE_NAMES = {page["name"] for page in CORE_PAGES}
+INDEX_ONLY_PAGES = [
+    {"name": "decisions/archive.html", "purpose": "Archived decision node index"},
+    {"name": "failure-todos/archive.html", "purpose": "Archived failure todo node index"},
+    {"name": "open-questions/archive.html", "purpose": "Archived open question node index"},
+]
+BLOCKED_GENERATED_PAGES = {"rules.html", "source-claims.html"}
 
 
 def load_permission_defaults() -> dict:
@@ -137,14 +159,7 @@ def scan_repo(target: Path) -> dict:
 
 def generate_suggested_pages(findings: dict) -> list:
     """From scan findings, suggest context pages."""
-    pages = []
-
-    # Always include these structural pages
-    pages.append({"name": "index.html", "purpose": "Root entry point and page map", "auto": True})
-    pages.append({"name": "control-plane.html", "purpose": "Runtime workflow checklist", "auto": True})
-    pages.append({"name": "ledger.html", "purpose": "Concurrency locks and history", "auto": True})
-    pages.append({"name": "agent-tree.html", "purpose": "Advisory agent coordination tree", "auto": True})
-    pages.append({"name": "decisions.html", "purpose": "Decision graph and rationale", "auto": True})
+    pages = [dict(page) for page in CORE_PAGES]
 
     # Suggest based on findings
     if findings["key_files"]:
@@ -212,8 +227,59 @@ def hattr(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+def write_simple_page(context_dir: Path, name: str, title: str, summary: str, body: str, today: str, see_also=None) -> None:
+    links = see_also or [("Index", "./index.html")]
+    nav = "\n".join(f'      <a href="{hattr(href)}">{htext(label)}</a>' for label, href in links)
+    page_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="title" content="{hattr(title)}">
+  <meta name="created" content="{today}">
+  <meta name="updated" content="{today}">
+  <meta name="locked" content="false">
+  <meta name="locked-by" content="">
+  <meta name="locked-at" content="">
+  <meta name="read-when" content="Need {hattr(title)} context">
+  <meta name="update-when" content="{hattr(title)} changes">
+  <meta name="tracks" content="context-only">
+</head>
+<body>
+  <header>
+    <h1>{htext(title)}</h1>
+    <p class="summary">{htext(summary)}</p>
+  </header>
+
+  <main>
+{body}
+  </main>
+
+  <footer>
+    <nav class="see-also">
+{nav}
+    </nav>
+  </footer>
+</body>
+</html>
+"""
+    write_atomic(context_dir / name, page_html, context_root=context_dir)
+
+
 def checked_page_name(context_dir: Path, name: str) -> str:
     return resolve_context_page(context_dir, name).relative_to(context_dir).as_posix()
+
+
+def normalize_pages(pages):
+    """Ensure V1 structural pages exist and excluded pages are never generated."""
+    normalized = [dict(page) for page in CORE_PAGES]
+    seen = {page["name"] for page in normalized}
+    for page in pages or []:
+        name = page.get("name")
+        if not name or name in seen or name in BLOCKED_GENERATED_PAGES:
+            continue
+        normalized.append(page)
+        seen.add(name)
+    return normalized
 
 
 BOOTLOADER_START = "<!-- context-architecture:start -->"
@@ -221,36 +287,10 @@ BOOTLOADER_END = "<!-- context-architecture:end -->"
 
 
 def render_bootloader_block() -> str:
-    return f"""{BOOTLOADER_START}
-## Context Architecture
-
-This repository has a deterministic local context architecture installed under `context/`.
-
-Start here for non-trivial work:
-
-- Read `context/index.html` before broad source exploration.
-- Use `context/control-plane.html` to choose read-only, tiny write, or standard write workflow.
-- Use `context/ledger.html` and `context/agent-tree.html` to see active work before escalating.
-- Use `context/decisions.html` for durable rationale.
-
-Routine context operations are script-owned. When tool permissions allow, run the scripts yourself instead of asking the user:
-
-- `python3 context/scripts/start-task.py --page <page> --intent "<intent>"`
-- `python3 context/scripts/route-diff.py --from HEAD~1 --to HEAD`
-- `python3 context/scripts/check-freshness.py --json`
-- `python3 context/scripts/update-tracks.py --page <page> --add <path>`
-- `python3 context/scripts/close-task.py --page <page> --summary "<summary>"`
-- `python3 context/scripts/validate.py`
-
-Rules:
-
-- HTML pages under `context/` are source of truth; `context/docs/` is generated.
-- Page-local `<meta name="tracks">` owns source freshness. Missing tracks never means scan the whole repo.
-- Ledger is audit history, not durable memory. Durable knowledge belongs in wiki pages and decisions.
-- Unknown agents default to `readonly`; mutating roles must be explicit in `context/config.json`.
-- Prefer context-mode for large analysis, but do not replace deterministic scripts with semantic search.
-{BOOTLOADER_END}
-"""
+    block = BOOTLOADER_TEMPLATE.read_text(errors="replace")
+    if BOOTLOADER_START not in block or BOOTLOADER_END not in block:
+        raise ValueError(f"{BOOTLOADER_TEMPLATE} must contain context-architecture markers")
+    return block
 
 
 def upsert_bootloader(path: Path, title: str) -> None:
@@ -342,12 +382,17 @@ def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> 
 
 def generate_skeleton(target: Path, pages: list, config: dict = None):
     """Generate the full context/ directory structure."""
+    pages = normalize_pages(pages)
     context_dir = target / "context"
     context_dir.mkdir(exist_ok=True)
-    (context_dir / "docs").mkdir(exist_ok=True)
     (context_dir / "scripts").mkdir(exist_ok=True)
     (context_dir / "hooks").mkdir(exist_ok=True)
     (context_dir / "archived").mkdir(exist_ok=True)
+    (context_dir / "runbooks").mkdir(exist_ok=True)
+    (target / "docs" / "context").mkdir(parents=True, exist_ok=True)
+    for node_dir in ("decisions", "failure-todos", "open-questions"):
+        (context_dir / node_dir).mkdir(exist_ok=True)
+        (context_dir / node_dir / "archived").mkdir(exist_ok=True)
 
     # Copy scripts from skill
     scripts_src = SKILL_ROOT / "scripts"
@@ -391,6 +436,9 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
             continue
         page_name = checked_page_name(context_dir, page["name"])
         page_links.append(f'      <li><a href="./{hattr(page_name)}">{htext(page_name)}</a> — {htext(page["purpose"])}</li>')
+    for page in INDEX_ONLY_PAGES:
+        page_name = checked_page_name(context_dir, page["name"])
+        page_links.append(f'      <li><a href="./{hattr(page_name)}">{htext(page_name)}</a> — {htext(page["purpose"])}</li>')
 
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -416,6 +464,13 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
       </ul>
     </section>
 
+    <section id="projection">
+      <h2>Human Projection</h2>
+      <ul>
+        <li><a href="../docs/context/">docs/context/</a> — generated human-facing context docs</li>
+      </ul>
+    </section>
+
     <section id="rules">
       <h2>Rules</h2>
       <ul>
@@ -434,6 +489,8 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
       <a href="./ledger.html">Lock Ledger</a>
       <a href="./agent-tree.html">Agent Tree</a>
       <a href="./decisions.html">Decisions</a>
+      <a href="./failure-todos.html">Failure Todos</a>
+      <a href="./open-questions.html">Open Questions</a>
     </nav>
   </footer>
 </body>
@@ -476,6 +533,15 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
       <h2>Escalation</h2>
       <p>Use orchestrator resolution for blocked locks, stale tracks, unmatched files, and orphan context pages.</p>
     </section>
+
+    <section id="routers">
+      <h2>Routers</h2>
+      <ul>
+        <li><a href="./failure-todos.html">Failure todos</a> block completion only when task scope intersects <code>affects</code>.</li>
+        <li><a href="./open-questions.html">Open questions</a> block only when marked blocking for related scope.</li>
+        <li><a href="./run-intent.html">Run intent</a> routes execution requests to runbooks; it does not execute commands.</li>
+      </ul>
+    </section>
   </main>
 
   <footer>
@@ -517,6 +583,17 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
       <table>
         <thead>
           <tr><th>Page</th><th>Agent</th><th>Acquired (UTC)</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="active-source-claims">
+      <h2>Active Source Claims</h2>
+      <table>
+        <thead>
+          <tr><th>Claim</th><th>Agent</th><th>Paths</th><th>Mode</th><th>Started (UTC)</th></tr>
         </thead>
         <tbody>
         </tbody>
@@ -630,6 +707,18 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
   </header>
 
   <main>
+    <section id="routes">
+      <h2>Routes</h2>
+      <table>
+        <thead>
+          <tr><th>Area</th><th>Decision Nodes</th><th>Archive</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Project</td><td><a href="./decisions/">decisions/</a></td><td><a href="./decisions/archive.html">archive</a></td></tr>
+        </tbody>
+      </table>
+    </section>
+
     <section id="decisions">
       <h2>Decisions</h2>
 
@@ -658,9 +747,186 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
 """
     write_atomic(context_dir / "decisions.html", decisions_html, context_root=context_dir)
 
+    write_simple_page(
+        context_dir,
+        "decisions/archive.html",
+        "Archived Decisions",
+        "Index of decisions removed from routine routing.",
+        """    <section id="archived-decisions">
+      <h2>Archived Decision Nodes</h2>
+      <table>
+        <thead>
+          <tr><th>Decision</th><th>Status</th><th>Archived (UTC)</th><th>Replacement</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>""",
+        today,
+        [("Decisions", "../decisions.html"), ("Index", "../index.html")],
+    )
+
+    write_simple_page(
+        context_dir,
+        "failure-todos.html",
+        "Failure Todos",
+        "Router for scoped unresolved failures and authorized repair work.",
+        """    <section id="failure-routes">
+      <h2>Failure Routes</h2>
+      <table>
+        <thead>
+          <tr><th>Failure</th><th>Status</th><th>Affects</th><th>Node</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="node-schema">
+      <h2>Node Schema</h2>
+      <p>Nodes live under <code>failure-todos/</code>. Status, affects, topics, repro, authorization, and resolution stay on the node.</p>
+    </section>""",
+        today,
+        [("Index", "./index.html"), ("Archive", "./failure-todos/archive.html")],
+    )
+
+    write_simple_page(
+        context_dir,
+        "failure-todos/archive.html",
+        "Archived Failure Todos",
+        "Index of resolved, deprecated, or non-routine failure nodes.",
+        """    <section id="archived-failures">
+      <h2>Archived Failure Nodes</h2>
+      <table>
+        <thead>
+          <tr><th>Failure</th><th>Final Status</th><th>Archived (UTC)</th><th>Resolution</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>""",
+        today,
+        [("Failure Todos", "../failure-todos.html"), ("Index", "../index.html")],
+    )
+
+    write_simple_page(
+        context_dir,
+        "open-questions.html",
+        "Open Questions",
+        "Router for unresolved assumptions, blocking questions, and answers.",
+        """    <section id="question-routes">
+      <h2>Question Routes</h2>
+      <table>
+        <thead>
+          <tr><th>Question</th><th>Status</th><th>Blocking</th><th>Affects</th><th>Node</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="node-schema">
+      <h2>Node Schema</h2>
+      <p>Nodes live under <code>open-questions/</code>. Blocking and affects fields decide related work impact.</p>
+    </section>""",
+        today,
+        [("Index", "./index.html"), ("Archive", "./open-questions/archive.html")],
+    )
+
+    write_simple_page(
+        context_dir,
+        "open-questions/archive.html",
+        "Archived Open Questions",
+        "Index of answered or deferred question nodes.",
+        """    <section id="archived-questions">
+      <h2>Archived Question Nodes</h2>
+      <table>
+        <thead>
+          <tr><th>Question</th><th>Final Status</th><th>Archived (UTC)</th><th>Answered By</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>""",
+        today,
+        [("Open Questions", "../open-questions.html"), ("Index", "../index.html")],
+    )
+
+    write_simple_page(
+        context_dir,
+        "reproducibility.html",
+        "Reproducibility",
+        "Project setup order, required tools, environment, and artifact paths.",
+        """    <section id="setup">
+      <h2>Setup</h2>
+      <table>
+        <thead>
+          <tr><th>Order</th><th>Requirement</th><th>Command or Path</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="do-not-assume">
+      <h2>Do Not Assume</h2>
+      <ul>
+      </ul>
+    </section>""",
+        today,
+    )
+
+    write_simple_page(
+        context_dir,
+        "run-intent.html",
+        "Run Intent Router",
+        "Router only. Maps execution intent to runbooks and expected result categories.",
+        """    <section id="intent-routes">
+      <h2>Intent Routes</h2>
+      <table>
+        <thead>
+          <tr><th>Intent</th><th>When To Use</th><th>Runbook</th><th>Expected Result</th><th>Affected Context</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="runbooks">
+      <h2>Runbooks</h2>
+      <p>Command details live under <a href="./runbooks/">runbooks/</a>; this page only routes.</p>
+    </section>""",
+        today,
+    )
+
+    write_simple_page(
+        context_dir,
+        "recognized-commits.html",
+        "Recognized Commits",
+        "Router for git ranges that have been reflected into context.",
+        """    <section id="recognized-ranges">
+      <h2>Recognized Ranges</h2>
+      <table>
+        <thead>
+          <tr><th>Range</th><th>Head</th><th>Recognized (UTC)</th><th>Ledger Event</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="commit-refs">
+      <h2>Commit References</h2>
+      <p>Reference commits or ranges. Do not duplicate full git history here.</p>
+    </section>""",
+        today,
+    )
+
     # Generate stub pages for each suggested domain page
     for page in pages:
-        if page["name"] in ("index.html", "control-plane.html", "ledger.html", "agent-tree.html", "decisions.html"):
+        if page["name"] in CORE_PAGE_NAMES:
+            continue
+        if page["name"] in BLOCKED_GENERATED_PAGES:
             continue
         if page.get("auto"):
             continue
@@ -765,12 +1031,13 @@ def main():
         print(json.dumps({"status": "error", "error": str(e)}))
         sys.exit(1)
     print(f"Generated context/ at {context_dir}")
-    print(f"  - {len(list(context_dir.glob('*.html')))} HTML pages")
+    print(f"  - {len(list(context_dir.rglob('*.html')))} HTML pages")
     print(f"  - {len(list((context_dir / 'scripts').glob('*.py')))} scripts")
     print(f"  - {len(list((context_dir / 'hooks').glob('*.sh')))} hooks")
     print(f"  - AGENTS.md and CLAUDE.md bootloader blocks")
     print(f"  - config.json")
     print(f"  - runtime-policy.md")
+    print(f"  - context/runbooks/ and docs/context/")
     if findings.get("doc_files"):
         print(f"  - doc import candidates: {len(doc_import_candidates(target, findings))} (use --absorb-docs to import)")
     if imported:

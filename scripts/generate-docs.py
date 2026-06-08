@@ -3,7 +3,7 @@
 Generate human-readable markdown docs from HTML source pages.
 
 Strips metadata (lock state, timestamps, tags), converts HTML structure to
-clean markdown, and writes to context/docs/.
+clean markdown, and writes to docs/context/.
 
 Usage:
     python context/scripts/generate-docs.py
@@ -199,27 +199,19 @@ def main():
             print("ERROR: No context/ directory found")
             return
 
-    docs_dir = context_dir / "docs"
-    docs_dir.mkdir(exist_ok=True)
+    docs_dir = context_dir.parent / "docs" / "context"
+    docs_dir.mkdir(parents=True, exist_ok=True)
 
-    html_files = sorted(context_dir.glob("*.html"))
+    html_files = sorted(context_dir.rglob("*.html"))
     converted = 0
 
     for html_file in html_files:
         md_content = convert_file(html_file)
-        md_path = docs_dir / html_file.with_suffix(".md").name
+        rel_path = html_file.relative_to(context_dir).with_suffix(".md")
+        md_path = docs_dir / rel_path
+        md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text(md_content)
         converted += 1
-
-    decisions_dir = context_dir / "decisions"
-    if decisions_dir.exists():
-        docs_decisions = docs_dir / "decisions"
-        docs_decisions.mkdir(exist_ok=True)
-        for html_file in sorted(decisions_dir.glob("*.html")):
-            md_content = convert_file(html_file)
-            md_path = docs_decisions / html_file.with_suffix(".md").name
-            md_path.write_text(md_content)
-            converted += 1
 
     print(f"Generated {converted} markdown files in {docs_dir}")
 
