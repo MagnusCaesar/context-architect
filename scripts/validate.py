@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from context_utils import check_reachability, find_context_root, ledger_render_limit, read_config, read_meta, tracks_status
+from knowledge_graph import load_nodes, validate_graphs
 
 
 def html_files(context_root: Path):
@@ -91,91 +92,22 @@ def check_index_coverage(context_root: Path):
     return failures
 
 
-def check_decision_graph(context_root: Path):
+def check_legacy_decision_fields(context_root: Path):
+    """Keep the router's legacy decision-card contract during v2 migration."""
     failures = []
     required_terms = {"Question", "Decision", "Rationale", "Consequences", "Review when"}
-    current_statuses = {"accepted", "implemented"}
-    non_current_statuses = {"superseded", "deprecated", "rejected"}
-    allowed_statuses = {"proposed", "accepted", "implemented", "superseded", "deprecated", "rejected"}
-    decision_statuses = {}
-    decision_locations = {}
-
     for html_file in html_files(context_root):
+        if read_meta(html_file, "contract-version") == "2":
+            continue
         content = html_file.read_text(errors="replace")
-        meta_decision_id = read_meta(html_file, "decision-id")
-        if meta_decision_id:
-            decision_statuses[meta_decision_id] = read_meta(html_file, "status")
-            decision_locations[meta_decision_id] = html_file.name
-        elif html_file.parent.name == "decisions" and html_file.stem.startswith("dec-"):
-            decision_statuses[html_file.stem] = read_meta(html_file, "status")
-            decision_locations[html_file.stem] = html_file.name
-        for attrs, article_body in re.findall(r'<article\b([^>]*)>(.*?)</article>', content, flags=re.S):
+        for attrs, body in re.findall(r'<article\b([^>]*)>(.*?)</article>', content, flags=re.S):
             if not re.search(r'class="[^"]*\bdecision\b[^"]*"', attrs):
                 continue
-            id_match = re.search(r'id="([^"]+)"', attrs)
-            decision_id = id_match.group(1) if id_match else f"{html_file.name}:unknown"
-            status_match = re.search(r'data-status="([^"]+)"', attrs)
-            if not status_match:
-                failures.append(f"{html_file.name}: {decision_id} missing data-status")
-            else:
-                decision_statuses[decision_id] = status_match.group(1)
-                decision_locations[decision_id] = html_file.name
-            terms = set(re.findall(r'<dt>\s*([^<]+?)\s*</dt>', article_body, flags=re.S))
+            decision_id = re.search(r'id="([^"]+)"', attrs)
+            label = decision_id.group(1) if decision_id else f"{html_file.name}:unknown"
+            terms = set(re.findall(r'<dt>\s*([^<]+?)\s*</dt>', body, flags=re.S))
             for required in sorted(required_terms - terms):
-                failures.append(f"{html_file.name}: {decision_id} missing decision field '{required}'")
-
-    decision_ids = set(decision_statuses)
-    for decision_id, status in decision_statuses.items():
-        location = decision_locations.get(decision_id, decision_id)
-        if not status:
-            failures.append(f"{location}: {decision_id} missing status")
-            continue
-        if status not in allowed_statuses:
-            failures.append(f"{location}: {decision_id} invalid status '{status}'")
-        path = context_root / "decisions" / f"{decision_id}.html"
-        if path.exists():
-            content = path.read_text(errors="replace")
-            if status == "implemented" and not read_meta(path, "commits"):
-                failures.append(f"{path.name}: implemented decision missing commits meta")
-            if status in non_current_statuses and 'id="rationale"' not in content:
-                failures.append(f"{path.name}: {status} decision missing rationale section")
-    superseded_refs = set()
-    for html_file in html_files(context_root):
-        content = html_file.read_text(errors="replace")
-        refs_by_edge = {}
-        for edge in ["builds-on", "related", "supersedes"]:
-            values = []
-            meta_value = read_meta(html_file, edge)
-            if meta_value:
-                values.append(meta_value)
-            values.extend(match.group(1) for match in re.finditer(rf'data-{edge}="([^"]+)"', content))
-            refs_by_edge[edge] = [
-                ref.strip()
-                for value in values
-                for ref in value.split(",")
-                if ref.strip()
-            ]
-        for ref in refs_by_edge["builds-on"]:
-            if ref not in decision_ids:
-                failures.append(f"{html_file.name}: builds-on references unknown '{ref}'")
-                continue
-            status = read_meta(html_file, "status")
-            if status in current_statuses and decision_statuses.get(ref) == "proposed":
-                failures.append(f"{html_file.name}: current decision builds on proposed '{ref}'")
-        for edge in ["related", "supersedes"]:
-            for ref in refs_by_edge[edge]:
-                if ref and ref not in decision_ids:
-                    failures.append(f"{html_file.name}: {edge} references unknown '{ref}'")
-                elif edge == "supersedes":
-                    superseded_refs.add(ref)
-        for match in re.finditer(r'data-builds-on="([^"]+)"', content):
-            for ref in [r.strip() for r in match.group(1).split(",")]:
-                if ref and ref not in decision_ids:
-                    failures.append(f"{html_file.name}: data-builds-on references unknown '{ref}'")
-    for decision_id, status in decision_statuses.items():
-        if status == "superseded" and decision_id not in superseded_refs:
-            location = decision_locations.get(decision_id, decision_id)
-            failures.append(f"{location}: superseded decision has no replacement supersedes edge")
+                failures.append(f"{html_file.name}: {label} missing decision field '{required}'")
     return failures
 
 
@@ -427,38 +359,6 @@ def check_router_structure(context_root: Path):
     return failures
 
 
-def check_decision_edges(context_root: Path):
-    """Validate all decision graph edge types point to valid dec-XXX IDs."""
-    failures = []
-    edge_types = ["data-builds-on", "data-supersedes", "data-resolves", "data-related", "data-affects"]
-
-    # Collect all valid decision IDs
-    decision_ids = set()
-    for html_file in html_files(context_root):
-        meta_decision_id = read_meta(html_file, "decision-id")
-        if meta_decision_id:
-            decision_ids.add(meta_decision_id)
-        elif html_file.parent.name == "decisions" and html_file.stem.startswith("dec-"):
-            decision_ids.add(html_file.stem)
-        content = html_file.read_text(errors="replace")
-        for attrs, _ in re.findall(r'<article\b([^>]*)>(.*?)</article>', content, flags=re.S):
-            if re.search(r'class="[^"]*\bdecision\b[^"]*"', attrs):
-                id_match = re.search(r'id="([^"]+)"', attrs)
-                if id_match:
-                    decision_ids.add(id_match.group(1))
-
-    # Validate all edge references
-    for html_file in html_files(context_root):
-        content = html_file.read_text(errors="replace")
-        for edge in edge_types:
-            for match in re.finditer(rf'{edge}="([^"]+)"', content):
-                refs = [r.strip() for r in match.group(1).split(",") if r.strip()]
-                for ref in refs:
-                    if ref not in decision_ids:
-                        failures.append(f"{html_file.name}: {edge} references unknown '{ref}'")
-    return failures
-
-
 def check_required_meta(context_root: Path):
     """Every .html page needs required meta fields, with exceptions."""
     failures = []
@@ -528,8 +428,8 @@ def main():
         "links": check_links(context_root),
         "lock_meta": check_lock_meta(context_root),
         "index_coverage": check_index_coverage(context_root),
-        "decision_graph": check_decision_graph(context_root),
-        "decision_edges": check_decision_edges(context_root),
+        "knowledge_graph": validate_graphs(context_root, load_nodes(context_root)),
+        "legacy_decision_fields": check_legacy_decision_fields(context_root),
         "router_structure": check_router_structure(context_root),
         "required_meta": check_required_meta(context_root),
         "ledger_consistency": check_ledger_consistency(context_root),
