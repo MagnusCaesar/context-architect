@@ -6,7 +6,7 @@ set -euo pipefail
 SKILL=context-architecture
 VERSION=@VERSION@
 PAYLOAD_LINE=@LINES@
-PLATFORM=both
+PLATFORM=
 TARGETS=()
 DRY=
 
@@ -27,11 +27,18 @@ case "$PLATFORM" in
   claude) TARGETS=("$HOME/.claude/skills") ;;
   codex)  TARGETS=("$HOME/.codex/skills") ;;
   both)   TARGETS=("$HOME/.claude/skills" "$HOME/.codex/skills") ;;
+  "") echo "choose --platform claude|codex|both" >&2; exit 2 ;;
   *) echo "--platform must be claude, codex, or both" >&2; exit 2 ;;
 esac
 
-command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
+if [ -n "$DRY" ]; then
+  for root in "${TARGETS[@]}"; do
+    echo "would install -> $root/$SKILL"
+  done
+  exit 0
+fi
 
+command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 tail -n +"$PAYLOAD_LINE" "$0" | tar xzf - -C "$STAGE"
@@ -41,7 +48,6 @@ printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 
 for root in "${TARGETS[@]}"; do
   dest="$root/$SKILL"
-  if [ -n "$DRY" ]; then echo "would install -> $dest"; continue; fi
   mkdir -p "$root"
   # Replace, but keep the previous copy recoverable: this skill's own repo may live here.
   if [ -e "$dest" ]; then
@@ -54,7 +60,6 @@ for root in "${TARGETS[@]}"; do
   echo "installed $SKILL $VERSION -> $dest"
 done
 
-[ -n "$DRY" ] && exit 0
 cat <<EOF
 
 Next: bootstrap a project with

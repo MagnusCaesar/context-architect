@@ -24,6 +24,23 @@ def homes(claude, codex):
     return {"claude": claude, "codex": codex}
 
 
+def snapshot_tree(root):
+    snapshot = []
+    for path in sorted((root, *root.rglob("*")), key=lambda item: str(item)):
+        stat = path.stat()
+        rel = "." if path == root else path.relative_to(root).as_posix()
+        snapshot.append((rel, "dir" if path.is_dir() else "file", stat.st_mtime_ns,
+                         None if path.is_dir() else path.read_bytes()))
+    return snapshot
+
+
+def build_installer(directory):
+    installer = Path(directory) / "installer.sh"
+    built = subprocess.run(["bash", str(SKILL / "package.sh"), str(installer)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr + built.stdout
+    return installer
+
+
 @pytest.mark.parametrize("explicit, claude_home, codex_home, expected", [
     ("claude", True, True, ("claude",)),
     ("codex", True, True, ("codex",)),
@@ -85,6 +102,19 @@ def test_malformed_markers_fail_without_writing(bad):
         assert agents.read_bytes() == original
 
 
+def test_dual_install_preflights_all_targets_before_writing():
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        (target / "CLAUDE.md").write_text(render_bootloader("claude").replace("### Claude Code", "### Stale Claude Code"))
+        (target / "AGENTS.md").write_text("<!-- context-architecture:start -->\nmalformed\n")
+        before = snapshot_tree(target)
+
+        with pytest.raises(PlatformError, match="managed markers"):
+            install_bootloaders(target, ("claude", "codex"))
+
+        assert snapshot_tree(target) == before
+
+
 def test_platform_templates_do_not_leak_other_harness_vocabulary():
     claude = render_bootloader("claude")
     codex = render_bootloader("codex")
@@ -116,6 +146,47 @@ def test_bootstrap_stores_platform_and_refresh_uses_it_without_detection():
         assert "new session required" in refreshed.stdout.lower()
 
 
+def test_bootstrap_preflights_dual_markers_before_creating_context():
+    bootstrap = SCRIPTS / "bootstrap.py"
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        (target / "CLAUDE.md").write_text(render_bootloader("claude"))
+        (target / "AGENTS.md").write_text("<!-- context-architecture:start -->\nmalformed\n")
+        before = snapshot_tree(target)
+
+        result = subprocess.run(
+            [sys.executable, str(bootstrap), "--target", str(target), "--platform", "both"],
+            capture_output=True, text=True,
+        )
+
+        assert result.returncode != 0
+        assert "managed markers" in result.stdout
+        assert snapshot_tree(target) == before
+
+
+def test_refresh_preflights_dual_markers_before_updating_machinery():
+    bootstrap = SCRIPTS / "bootstrap.py"
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        created = subprocess.run(
+            [sys.executable, str(bootstrap), "--target", str(target), "--platform", "both"],
+            capture_output=True, text=True,
+        )
+        assert created.returncode == 0, created.stderr + created.stdout
+        (target / "CLAUDE.md").write_text(render_bootloader("claude").replace("### Claude Code", "### Stale Claude Code"))
+        (target / "AGENTS.md").write_text("<!-- context-architecture:start -->\nmalformed\n")
+        before = snapshot_tree(target)
+
+        result = subprocess.run(
+            [sys.executable, str(bootstrap), "--target", str(target), "--refresh"],
+            capture_output=True, text=True,
+        )
+
+        assert result.returncode != 0
+        assert "managed markers" in result.stdout
+        assert snapshot_tree(target) == before
+
+
 @pytest.mark.parametrize("platform, expected", [
     ("claude", (".claude/skills/context-architecture",)),
     ("codex", (".codex/skills/context-architecture",)),
@@ -123,15 +194,38 @@ def test_bootstrap_stores_platform_and_refresh_uses_it_without_detection():
 ])
 def test_installer_dry_run_selects_platform_without_creating_home(platform, expected):
     with tempfile.TemporaryDirectory() as directory:
-        installer = Path(directory) / "installer.sh"
-        built = subprocess.run(["bash", str(SKILL / "package.sh"), str(installer)], capture_output=True, text=True)
-        assert built.returncode == 0, built.stderr + built.stdout
-        home = Path(directory) / "home"
-        env = dict(os.environ, HOME=str(home))
+        installer = build_installer(directory)
+        observed = Path(directory) / "observed"
+        home = observed / "home"
+        temp_root = observed / "tmp"
+        home.mkdir(parents=True)
+        temp_root.mkdir()
+        (home / "sentinel").write_text("home")
+        (temp_root / "sentinel").write_text("tmp")
+        before = snapshot_tree(observed)
+        env = dict(os.environ, HOME=str(home), TMPDIR=str(temp_root))
         result = subprocess.run(
             ["bash", str(installer), "--dry-run", "--platform", platform],
             capture_output=True, text=True, env=env,
         )
         assert result.returncode == 0, result.stderr + result.stdout
         assert all(path in result.stdout for path in expected)
-        assert not home.exists()
+        assert snapshot_tree(observed) == before
+
+
+def test_installer_requires_explicit_platform_before_any_write():
+    with tempfile.TemporaryDirectory() as directory:
+        installer = build_installer(directory)
+        observed = Path(directory) / "observed"
+        home = observed / "home"
+        temp_root = observed / "tmp"
+        home.mkdir(parents=True)
+        temp_root.mkdir()
+        before = snapshot_tree(observed)
+        env = dict(os.environ, HOME=str(home), TMPDIR=str(temp_root))
+
+        result = subprocess.run(["bash", str(installer), "--dry-run"], capture_output=True, text=True, env=env)
+
+        assert result.returncode == 2
+        assert "--platform" in result.stderr
+        assert snapshot_tree(observed) == before

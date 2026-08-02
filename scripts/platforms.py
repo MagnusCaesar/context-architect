@@ -9,6 +9,10 @@ PLATFORMS = ("claude", "codex")
 BOOTLOADER_START = "<!-- context-architecture:start -->"
 BOOTLOADER_END = "<!-- context-architecture:end -->"
 TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
+BOOTLOADER_FILES = {
+    "claude": ("CLAUDE.md", "Claude Instructions"),
+    "codex": ("AGENTS.md", "Agent Instructions"),
+}
 
 
 class PlatformError(ValueError):
@@ -85,28 +89,40 @@ def _write_if_changed(path: Path, data: bytes) -> None:
     os.replace(staged, path)
 
 
-def upsert_bootloader(path: Path, platform: str, title: str) -> None:
-    block = render_bootloader(platform).encode()
-    _marker_span(block)
+def _render_upsert(path: Path, title: str, block: bytes) -> bytes:
     if not path.exists():
-        _write_if_changed(path, f"# {title}\n\n".encode() + block + b"\n")
-        return
+        return f"# {title}\n\n".encode() + block + b"\n"
     authored = path.read_bytes()
     starts = authored.count(BOOTLOADER_START.encode())
     ends = authored.count(BOOTLOADER_END.encode())
     if starts == 0 and ends == 0:
         separator = b"" if not authored else b"\n\n"
-        _write_if_changed(path, authored + separator + block + b"\n")
-        return
+        return authored + separator + block + b"\n"
     left, right = _marker_span(authored)
-    _write_if_changed(path, authored[:left] + block + authored[right:])
+    return authored[:left] + block + authored[right:]
+
+
+def preflight_bootloaders(target: Path, platforms):
+    """Render and validate every selected target without writing."""
+    planned = []
+    for platform in tuple(platforms):
+        if platform not in BOOTLOADER_FILES:
+            raise PlatformError("platform must be claude or codex")
+        filename, title = BOOTLOADER_FILES[platform]
+        path = target / filename
+        block = render_bootloader(platform).encode()
+        planned.append((path, filename, _render_upsert(path, title, block)))
+    return planned
+
+
+def upsert_bootloader(path: Path, platform: str, title: str) -> None:
+    block = render_bootloader(platform).encode()
+    updated = _render_upsert(path, title, block)
+    _write_if_changed(path, updated)
 
 
 def install_bootloaders(target: Path, platforms) -> list[str]:
-    files = {"claude": ("CLAUDE.md", "Claude Instructions"), "codex": ("AGENTS.md", "Agent Instructions")}
-    written = []
-    for platform in tuple(platforms):
-        filename, title = files[platform]
-        upsert_bootloader(target / filename, platform, title)
-        written.append(filename)
-    return written
+    planned = preflight_bootloaders(target, platforms)
+    for path, _, updated in planned:
+        _write_if_changed(path, updated)
+    return [filename for _, filename, _ in planned]

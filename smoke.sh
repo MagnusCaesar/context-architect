@@ -107,6 +107,22 @@ step "bootstrap generates context/" \
 step_output "bootstrap reports bootloader files" "AGENTS.md and CLAUDE.md" \
     python3 "$SCRIPTS/bootstrap.py" --target "$TMP" --platform both
 
+CLAUDE_ONLY="$TMP/platform-claude"
+CODEX_ONLY="$TMP/platform-codex"
+mkdir -p "$CLAUDE_ONLY" "$CODEX_ONLY"
+step "Claude platform bootstrap succeeds" \
+    python3 "$SCRIPTS/bootstrap.py" --target "$CLAUDE_ONLY" --platform claude
+step "Claude platform writes only CLAUDE.md" \
+    test -f "$CLAUDE_ONLY/CLAUDE.md"
+step "Claude platform omits AGENTS.md" \
+    test ! -e "$CLAUDE_ONLY/AGENTS.md"
+step "Codex platform bootstrap succeeds" \
+    python3 "$SCRIPTS/bootstrap.py" --target "$CODEX_ONLY" --platform codex
+step "Codex platform writes only AGENTS.md" \
+    test -f "$CODEX_ONLY/AGENTS.md"
+step "Codex platform omits CLAUDE.md" \
+    test ! -e "$CODEX_ONLY/CLAUDE.md"
+
 BAD_TMP=$(mktemp -d)
 step_output "bootstrap rejects escaping page names" '"status": "error"' \
     python3 "$SCRIPTS/bootstrap.py" --target "$BAD_TMP" --platform codex --pages-json '[{"name":"../evil.html","purpose":"bad"}]'

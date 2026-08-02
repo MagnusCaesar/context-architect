@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from context_utils import resolve_context_page, today_utc, write_atomic
-from platforms import PlatformError, install_bootloaders, platform_choice, platform_homes, resolve_platform
+from platforms import PlatformError, install_bootloaders, platform_choice, platform_homes, preflight_bootloaders, resolve_platform
 
 
 SKILL_ROOT = Path(__file__).parent.parent
@@ -504,6 +504,8 @@ def refresh_context(target: Path, platforms) -> dict:
     context_dir = target / "context"
     if not (context_dir / "index.html").exists():
         return {"status": "error", "error": f"{context_dir}/index.html not found — not a context-arch dir; run full bootstrap first"}
+    platform_choice(platforms)
+    preflight_bootloaders(target, platforms)
 
     updated = []
 
@@ -696,6 +698,8 @@ def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> 
 
 def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str = "project", platforms=("claude",)):
     """Generate the full context/ directory structure."""
+    platform_choice(platforms)
+    preflight_bootloaders(target, platforms)
     pages = normalize_pages(pages)
     context_dir = target / "context"
     context_dir.mkdir(exist_ok=True)
@@ -1351,7 +1355,11 @@ def main():
         except (KeyError, OSError, json.JSONDecodeError, PlatformError) as e:
             print(json.dumps({"status": "error", "error": f"refresh requires stored platform: {e}"}))
             sys.exit(1)
-        report = refresh_context(target, platforms)
+        try:
+            report = refresh_context(target, platforms)
+        except PlatformError as e:
+            print(json.dumps({"status": "error", "error": str(e)}))
+            sys.exit(1)
         if report.get("status") == "error":
             print(json.dumps(report, indent=2))
             sys.exit(1)
