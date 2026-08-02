@@ -1,0 +1,11 @@
+{
+  "hook_event_name": "PreToolUse",
+  "cwd": "/work/project",
+  "session_id": "claude-session",
+  "turn_id": "turn-1",
+  "agent_id": "agent-7",
+  "tool_name": "Edit",
+  "tool_input": {"file_path": "dir with space/file.py"},
+  "permission_mode": "default",
+  "model": "claude-test"
+}

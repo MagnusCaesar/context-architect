@@ -1,6 +1,7 @@
 """Small Claude/Codex instruction adapters."""
 
 import os
+import shlex
 import tempfile
 from pathlib import Path
 
@@ -126,3 +127,26 @@ def install_bootloaders(target: Path, platforms) -> list[str]:
     for path, _, updated in planned:
         _write_if_changed(path, updated)
     return [filename for _, filename, _ in planned]
+
+
+def managed_hook_config(platform: str, target: Path, scope: str = "project") -> dict:
+    """Render one marker-tagged dispatcher group per lifecycle event."""
+    if platform not in PLATFORMS:
+        raise PlatformError("platform must be claude or codex")
+    events = ["UserPromptSubmit", "PreCompact", "PostCompact", "PreToolUse", "PostToolUse",
+              "SubagentStart", "SubagentStop", "Stop", "SessionEnd"]
+    if scope == "global":
+        events.insert(0, "SessionStart")
+    script = target.resolve() / "context" / "scripts" / "hook_dispatch.py"
+    context = target.resolve() / "context"
+    hooks = {}
+    for event in events:
+        command = (
+            f"python3 {shlex.quote(str(script))} --platform {platform} --event {event} "
+            f"--context-root {shlex.quote(str(context))} --managed-group context-architecture"
+        )
+        group = {"hooks": [{"type": "command", "command": command}]}
+        if event in {"PreToolUse", "PostToolUse"}:
+            group["matcher"] = "Edit|Write|apply_patch"
+        hooks[event] = [group]
+    return {"hooks": hooks}

@@ -30,7 +30,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from context_utils import resolve_context_page, today_utc, write_atomic
-from platforms import PlatformError, install_bootloaders, platform_choice, platform_homes, preflight_bootloaders, resolve_platform
+from hook_dispatch import merge_hook_config
+from platforms import (PlatformError, install_bootloaders, managed_hook_config,
+                       platform_choice, platform_homes, preflight_bootloaders,
+                       resolve_platform)
 
 
 SKILL_ROOT = Path(__file__).parent.parent
@@ -459,26 +462,19 @@ def install_pre_commit(context_dir: Path, hooks_src: Path, config: dict | None) 
 
 
 def install_platform_hooks(target: Path, platforms, scope: str = "project") -> None:
-    """Install legacy hooks for explicitly selected platforms.
-
-    Claude Code: auto-creates .claude/settings.json with stdin-based wrapper hooks.
-    Codex: hooks are copied to context/hooks/ but not auto-installed (Codex agents
-    read the install comment in each hook script and AGENTS.md bootloader instructions).
-    """
-    if "claude" not in platforms:
-        return
-    claude_dir = target / ".claude"
-    claude_dir.mkdir(exist_ok=True)
-    settings_path = claude_dir / "settings.json"
-    new_hooks = absolutize_hooks(hooks_for_scope(scope), target)
-    if settings_path.exists():
-        existing = json.loads(settings_path.read_text(errors="replace"))
-        if "hooks" in existing:
-            return  # idempotent guard preserved
-        existing["hooks"] = new_hooks
-        write_atomic(settings_path, json.dumps(existing, indent=2) + "\n")
-    else:
-        write_atomic(settings_path, json.dumps({"hooks": new_hooks}, indent=2) + "\n")
+    """Merge only this adapter's dispatcher entries into selected configs."""
+    locations = {
+        "claude": target / ".claude" / "settings.json",
+        "codex": target / ".codex" / "hooks.json",
+    }
+    for platform in platforms:
+        path = locations[platform]
+        raw = path.read_bytes() if path.exists() else {}
+        merged = merge_hook_config(raw, managed_hook_config(platform, target, scope))
+        if isinstance(merged, (bytes, str)):  # malformed JSON: preserve byte-for-byte
+            continue
+        path.parent.mkdir(exist_ok=True)
+        write_atomic(path, json.dumps(merged, indent=2) + "\n")
 
 
 SELF_HEALING_CONFIG_DEFAULTS = {
@@ -577,26 +573,17 @@ def refresh_context(target: Path, platforms) -> dict:
             write_atomic(config_path, json.dumps(cfg, indent=2) + "\n", context_root=context_dir)
             updated.append(f"config.json (+{','.join(config_added)})")
 
-    # Force-update settings.json hooks (install_platform_hooks refuses if hooks exist)
-    if "claude" in platforms:
-        claude_dir = target / ".claude"
-        claude_dir.mkdir(exist_ok=True)
-        settings_path = claude_dir / "settings.json"
-        if settings_path.exists():
-            existing = json.loads(settings_path.read_text(errors="replace"))
-        else:
-            existing = {}
-        # Read stored scope so refresh preserves global hooks (SessionStart+Stop)
-        _cfg_path = context_dir / "config.json"
-        _scope = "project"
-        if _cfg_path.exists():
-            try:
-                _scope = json.loads(_cfg_path.read_text(errors="replace")).get("scope", "project")
-            except (json.JSONDecodeError, OSError):
-                pass
-        existing["hooks"] = absolutize_hooks(hooks_for_scope(_scope), context_dir.parent)
-        write_atomic(settings_path, json.dumps(existing, indent=2) + "\n")
-        updated.append(".claude/settings.json (hooks)")
+    # Preserve selected scope while replacing only marked dispatcher groups.
+    _cfg_path = context_dir / "config.json"
+    _scope = "project"
+    if _cfg_path.exists():
+        try:
+            _scope = json.loads(_cfg_path.read_text(errors="replace")).get("scope", "project")
+        except (json.JSONDecodeError, OSError):
+            pass
+    install_platform_hooks(target, platforms, scope=_scope)
+    for platform in platforms:
+        updated.append(f".{platform}/{'settings.json' if platform == 'claude' else 'hooks.json'} (hooks)")
 
     # Re-render managed bootloader block (marker-delimited; authored prose untouched)
     for _bl in install_bootloaders(target, platforms):
