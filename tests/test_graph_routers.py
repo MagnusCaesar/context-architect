@@ -1,3 +1,5 @@
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,6 +9,9 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from knowledge_graph import load_nodes, router_heads, validate_graphs  # noqa: E402
+from validate import check_reachability_critical  # noqa: E402
+
+BOOTSTRAP = SCRIPTS / "bootstrap.py"
 
 
 def node(node_id, kind, status, *, parent="", children="", archived=False):
@@ -82,11 +87,45 @@ def mutated_graph_fixture(tmp_path, mutation):
     return root
 
 
+def fresh_bootstrap(tmp_path, pages=None):
+    target = tmp_path / "project"
+    target.mkdir()
+    command = [sys.executable, str(BOOTSTRAP), "--target", str(target)]
+    if pages:
+        command.extend(["--pages-json", json.dumps(pages)])
+    subprocess.run(command, check=True, capture_output=True, text=True)
+    return target / "context"
+
+
 def test_router_contains_all_and_only_live_heads(tmp_path):
     root = graph_fixture(tmp_path)
     errors = validate_graphs(root, load_nodes(root))
     assert errors == []
     assert [n.node_id for n in router_heads(root, "decision")] == ["dec-001-root", "dec-003-other"]
+
+
+def test_fresh_bootstrap_routes_legacy_decision_head(tmp_path):
+    root = fresh_bootstrap(tmp_path)
+    assert validate_graphs(root, load_nodes(root)) == []
+    assert [node.node_id for node in router_heads(root, "decision")] == ["dec-001"]
+
+
+def test_fresh_bootstrap_normalizes_root_project_page_as_wiki(tmp_path):
+    root = fresh_bootstrap(tmp_path, [{"name": "architecture.html", "purpose": "Architecture"}])
+    nodes = load_nodes(root)
+    architecture = next(node for node in nodes if node.path.name == "architecture.html")
+    assert (architecture.node_id, architecture.kind, architecture.status) == ("architecture", "wiki", "active")
+    assert [node.node_id for node in router_heads(root, "wiki")] == ["architecture"]
+    assert validate_graphs(root, nodes) == []
+
+
+def test_unreachable_legacy_root_page_is_hard_failure(tmp_path):
+    root = tmp_path / "context"
+    root.mkdir()
+    (root / "index.html").write_text('<html><body><a href="wiki.html">wiki</a></body></html>')
+    (root / "wiki.html").write_text(router("wiki"))
+    (root / "orphan.html").write_text('<html><body><h1>Orphan</h1></body></html>')
+    assert "orphan page: context/orphan.html" in check_reachability_critical(root)
 
 
 @pytest.mark.parametrize("mutation, expected", [

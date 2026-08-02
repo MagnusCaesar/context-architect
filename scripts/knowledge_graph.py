@@ -29,6 +29,13 @@ ROUTERS = {
     "work": "workstreams.html",
 }
 
+ROOT_NON_NODE_PAGES = {
+    "index.html", "control-plane.html", "ledger.html", "agent-tree.html",
+    "wiki.html", "decisions.html", "failure-todos.html", "workstreams.html",
+    "history.html", "open-questions.html", "reproducibility.html",
+    "run-intent.html", "recognized-commits.html",
+}
+
 
 @dataclass(frozen=True)
 class Node:
@@ -125,11 +132,13 @@ def load_nodes(context_root: Path) -> list[Node]:
         article = re.search(r"<article\b([^>]*)>(.*?)</article>", content, flags=re.I | re.S)
         attrs = _attrs(article.group(1)) if article else {}
         body = article.group(2) if article else content
-        legacy_kind = "decision" if "decision" in attrs.get("class", "").split() else ""
+        relative = path.relative_to(context_root)
+        root_wiki = len(relative.parts) == 1 and path.name not in ROOT_NON_NODE_PAGES
+        legacy_kind = "decision" if "decision" in attrs.get("class", "").split() else "wiki" if root_wiki else ""
         if not path_kind and not is_v2 and not legacy_kind:
             continue
         node_id = _field(attrs, meta, body, "node-id") or _field(attrs, meta, body, "id")
-        if not node_id and path_kind:
+        if not node_id and (path_kind or legacy_kind):
             node_id = path.stem
         if not node_id:
             continue
@@ -296,12 +305,12 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
             elif node.parent:
                 errors.append((router, f"router contains non-head {node.node_id}"))
         for node in heads(nodes, kind):
-            if _is_v2(node.path) and not node.archived and node.node_id not in listed_ids:
+            if not node.archived and node.node_id not in listed_ids:
                 errors.append((router, f"router omits live head {node.node_id}"))
 
     if (context_root / "index.html").exists():
         reachable = {node.node_id for node in reachable_nodes(context_root, nodes)}
         for node in nodes:
-            if _is_v2(node.path) and not node.archived and node.node_id not in reachable:
+            if not node.archived and node.node_id not in reachable:
                 errors.append((node.path, f"unreachable live node {node.node_id}"))
     return [message for _, message in sorted(errors, key=lambda item: (item[0].as_posix(), item[1]))]

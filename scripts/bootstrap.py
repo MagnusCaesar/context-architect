@@ -53,13 +53,6 @@ CORE_PAGES = [
 ]
 
 CORE_PAGE_NAMES = {page["name"] for page in CORE_PAGES}
-INDEX_ONLY_PAGES = [
-    {"name": "wiki/archive.html", "purpose": "Archived wiki node index"},
-    {"name": "decisions/archive.html", "purpose": "Archived decision node index"},
-    {"name": "failure-todos/archive.html", "purpose": "Archived failure todo node index"},
-    {"name": "workstreams/archive.html", "purpose": "Archived work node index"},
-    {"name": "open-questions/archive.html", "purpose": "Archived open question node index"},
-]
 BLOCKED_GENERATED_PAGES = {"rules.html", "source-claims.html"}
 
 
@@ -827,14 +820,15 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     project_text = htext(project_name)
     project_attr = hattr(project_name)
     page_links = []
+    wiki_pages = []
     for page in pages:
         if page["name"] == "index.html":
             continue
         page_name = checked_page_name(context_dir, page["name"])
-        page_links.append(f'      <li><a href="./{hattr(page_name)}">{htext(page_name)}</a> — {htext(page["purpose"])}</li>')
-    for page in INDEX_ONLY_PAGES:
-        page_name = checked_page_name(context_dir, page["name"])
-        page_links.append(f'      <li><a href="./{hattr(page_name)}">{htext(page_name)}</a> — {htext(page["purpose"])}</li>')
+        if page_name in CORE_PAGE_NAMES:
+            page_links.append(f'      <li><a href="./{hattr(page_name)}">{htext(page_name)}</a> — {htext(page["purpose"])}</li>')
+        elif "/" not in page_name and page_name not in BLOCKED_GENERATED_PAGES and not page.get("auto"):
+            wiki_pages.append((page_name, page["purpose"]))
 
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1082,14 +1076,19 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
 """
     write_atomic(context_dir / "agent-tree.html", agent_tree_html, context_root=context_dir)
 
+    wiki_links = "\n".join(
+        f'        <li><a href="./{hattr(name)}">{htext(name)}</a> — {htext(purpose)}</li>'
+        for name, purpose in wiki_pages
+    )
     write_simple_page(
         context_dir,
         "wiki.html",
         "Project Wiki",
         "Router for live project knowledge pages.",
-        """    <section id="graph">
+        f"""    <section id="graph">
       <h2>Live Wiki Nodes</h2>
       <ul>
+{wiki_links}
       </ul>
     </section>""",
         today,
@@ -1142,6 +1141,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     <section id="graph">
       <h2>Live Decision Heads</h2>
       <ul>
+        <li><a href="./decisions.html#dec-001">DEC-001: Context Architecture</a></li>
       </ul>
     </section>
 

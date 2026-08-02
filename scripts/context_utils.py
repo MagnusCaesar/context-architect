@@ -504,7 +504,7 @@ def rel_to_project(context_root: Path, path: Path) -> str:
 def live_context_pages(context_root: Path) -> set[str]:
     pages = set()
     for page in context_root.rglob("*.html"):
-        if "docs" in page.parts or ".locks" in page.parts:
+        if "docs" in page.parts or ".locks" in page.parts or "archived" in page.relative_to(context_root).parts:
             continue
         pages.add(rel_to_project(context_root, page))
     return pages
