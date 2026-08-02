@@ -5,7 +5,7 @@ SKILL = Path(__file__).resolve().parent.parent
 BOOTSTRAP = SKILL / "scripts" / "bootstrap.py"
 
 def _boot(target, *extra):
-    subprocess.run([sys.executable, str(BOOTSTRAP), "--target", str(target), *extra],
+    subprocess.run([sys.executable, str(BOOTSTRAP), "--target", str(target), "--platform", "claude", *extra],
                    capture_output=True, text=True)
     return json.loads((Path(target) / ".claude" / "settings.json").read_text())["hooks"]
 
@@ -40,7 +40,7 @@ def test_subagent_start_registered_both_scopes():
     BOOTSTRAP = SKILL / "scripts" / "bootstrap.py"
     for scope_args in (["--scope", "global"], []):
         with tempfile.TemporaryDirectory() as d:
-            subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d, *scope_args],
+            subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d, "--platform", "claude", *scope_args],
                            capture_output=True, text=True)
             hooks = json.loads((Path(d) / ".claude" / "settings.json").read_text())["hooks"]
             assert "SubagentStart" in hooks, f"missing for {scope_args}"
@@ -52,7 +52,7 @@ def test_read_direction_hooks_registered():
     SKILL = Path(__file__).resolve().parent.parent
     BOOTSTRAP = SKILL / "scripts" / "bootstrap.py"
     with tempfile.TemporaryDirectory() as d:
-        subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d],
+        subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d, "--platform", "claude"],
                        capture_output=True, text=True)
         hooks = json.loads((Path(d) / ".claude" / "settings.json").read_text())["hooks"]
         ups = json.dumps(hooks["UserPromptSubmit"])
@@ -83,7 +83,7 @@ def test_stop_registers_capture_and_autocommit():
     SKILL = Path(__file__).resolve().parent.parent
     BOOTSTRAP = SKILL / "scripts" / "bootstrap.py"
     with tempfile.TemporaryDirectory() as d:
-        subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d],
+        subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d, "--platform", "claude"],
                        capture_output=True, text=True)
         hooks = json.loads((Path(d) / ".claude" / "settings.json").read_text())["hooks"]
         stop = json.dumps(hooks["Stop"])
@@ -100,7 +100,7 @@ def test_hook_commands_are_absolute():
     SKILL = Path(__file__).resolve().parent.parent
     BOOTSTRAP = SKILL / "scripts" / "bootstrap.py"
     with tempfile.TemporaryDirectory() as d:
-        subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d],
+        subprocess.run([sys.executable, str(BOOTSTRAP), "--target", d, "--platform", "claude"],
                        capture_output=True, text=True)
         hooks = json.loads((Path(d) / ".claude" / "settings.json").read_text())["hooks"]
         cmds = [x["command"] for v in hooks.values() for g in v for x in g.get("hooks", [])]

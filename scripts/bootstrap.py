@@ -30,11 +30,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from context_utils import resolve_context_page, today_utc, write_atomic
+from platforms import PlatformError, install_bootloaders, platform_choice, platform_homes, resolve_platform
 
 
 SKILL_ROOT = Path(__file__).parent.parent
 TEMPLATES_DIR = SKILL_ROOT / "templates"
-BOOTLOADER_TEMPLATE = TEMPLATES_DIR / "bootloader-block.md"
 
 CORE_PAGES = [
     {"name": "index.html", "purpose": "Root entry point and page map", "auto": True},
@@ -282,34 +282,6 @@ def normalize_pages(pages):
     return normalized
 
 
-BOOTLOADER_START = "<!-- context-architecture:start -->"
-BOOTLOADER_END = "<!-- context-architecture:end -->"
-
-
-def render_bootloader_block() -> str:
-    block = BOOTLOADER_TEMPLATE.read_text(errors="replace")
-    if BOOTLOADER_START not in block or BOOTLOADER_END not in block:
-        raise ValueError(f"{BOOTLOADER_TEMPLATE} must contain context-architecture markers")
-    return block
-
-
-def upsert_bootloader(path: Path, title: str) -> None:
-    block = render_bootloader_block().rstrip() + "\n"
-    if path.exists():
-        text = path.read_text(errors="replace")
-        pattern = re.compile(
-            rf"{re.escape(BOOTLOADER_START)}.*?{re.escape(BOOTLOADER_END)}\n?",
-            flags=re.S,
-        )
-        if pattern.search(text):
-            updated = pattern.sub(block, text)
-        else:
-            updated = text.rstrip() + "\n\n" + block
-    else:
-        updated = f"# {title}\n\n{block}"
-    write_atomic(path, updated)
-
-
 CLAUDE_HOOKS_SETTINGS = {
     "hooks": {
         "UserPromptSubmit": [
@@ -486,29 +458,14 @@ def install_pre_commit(context_dir: Path, hooks_src: Path, config: dict | None) 
     return installed
 
 
-def detect_platform() -> str:
-    """Detect whether running under Claude Code or Codex."""
-    if os.environ.get("CLAUDE_CODE") or Path.home().joinpath(".claude").is_dir():
-        return "claude"
-    if os.environ.get("CODEX") or Path.home().joinpath(".codex").is_dir():
-        return "codex"
-    skill_path = str(SKILL_ROOT)
-    if ".claude" in skill_path:
-        return "claude"
-    if ".codex" in skill_path:
-        return "codex"
-    return "claude"
-
-
-def install_platform_hooks(target: Path, scope: str = "project") -> None:
-    """Install hooks appropriate for the detected platform.
+def install_platform_hooks(target: Path, platforms, scope: str = "project") -> None:
+    """Install legacy hooks for explicitly selected platforms.
 
     Claude Code: auto-creates .claude/settings.json with stdin-based wrapper hooks.
     Codex: hooks are copied to context/hooks/ but not auto-installed (Codex agents
     read the install comment in each hook script and AGENTS.md bootloader instructions).
     """
-    platform = detect_platform()
-    if platform != "claude":
+    if "claude" not in platforms:
         return
     claude_dir = target / ".claude"
     claude_dir.mkdir(exist_ok=True)
@@ -536,7 +493,7 @@ SELF_HEALING_CONFIG_DEFAULTS = {
 }
 
 
-def refresh_context(target: Path) -> dict:
+def refresh_context(target: Path, platforms) -> dict:
     """Idempotently refresh skill-owned machinery in an existing context/ dir.
 
     Updates scripts, hooks, git post-commit, .gitignore, settings.json hooks, and
@@ -619,7 +576,7 @@ def refresh_context(target: Path) -> dict:
             updated.append(f"config.json (+{','.join(config_added)})")
 
     # Force-update settings.json hooks (install_platform_hooks refuses if hooks exist)
-    if detect_platform() == "claude":
+    if "claude" in platforms:
         claude_dir = target / ".claude"
         claude_dir.mkdir(exist_ok=True)
         settings_path = claude_dir / "settings.json"
@@ -640,7 +597,7 @@ def refresh_context(target: Path) -> dict:
         updated.append(".claude/settings.json (hooks)")
 
     # Re-render managed bootloader block (marker-delimited; authored prose untouched)
-    for _bl in install_bootloaders(target):
+    for _bl in install_bootloaders(target, platforms):
         updated.append(_bl)
 
     # Run validation, capture failures
@@ -673,14 +630,6 @@ def refresh_context(target: Path) -> dict:
         "validate_passed": validate_passed,
         "validate_failures": validate_failures,
     }
-
-
-def install_bootloaders(target: Path) -> list[str]:
-    written = []
-    for filename, title in (("AGENTS.md", "Agent Instructions"), ("CLAUDE.md", "Claude Instructions")):
-        upsert_bootloader(target / filename, title)
-        written.append(filename)
-    return written
 
 
 def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> list:
@@ -745,7 +694,7 @@ def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> 
     return imported
 
 
-def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str = "project"):
+def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str = "project", platforms=("claude",)):
     """Generate the full context/ directory structure."""
     pages = normalize_pages(pages)
     context_dir = target / "context"
@@ -808,8 +757,9 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
         "scope": scope,
         "autoCommitContext": True,
     }
-    # If a config was passed in explicitly, still stamp scope on it:
+    # If a config was passed in explicitly, still stamp bootstrap selections on it:
     config_data.setdefault("scope", scope)
+    config_data["platform"] = platform_choice(platforms)
     permission_defaults = load_permission_defaults()
     for key in ("defaultRole", "agentRoles", "permissionProfiles"):
         if key in permission_defaults:
@@ -1367,8 +1317,8 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
         if not page_path.exists():
             write_atomic(page_path, stub_html, context_root=context_dir)
 
-    install_bootloaders(target)
-    install_platform_hooks(target, scope=scope)
+    install_bootloaders(target, platforms)
+    install_platform_hooks(target, platforms, scope=scope)
     return context_dir
 
 
@@ -1381,6 +1331,8 @@ def main():
     parser.add_argument("--pages-json", help="JSON string of pages to generate")
     parser.add_argument("--absorb-docs", action="store_true", help="Import headed docs into context pages and archive copies")
     parser.add_argument("--refresh", action="store_true", help="Idempotently refresh skill machinery in an existing context/ dir (preserves authored content + config values)")
+    parser.add_argument("--platform", choices=["claude", "codex", "both"],
+                        help="Target harness; required when detection is ambiguous")
     parser.add_argument("--scope", choices=["project", "global"], default="project",
                         help="project = standard per-project context (default); "
                              "global = first-mate cross-project context instance")
@@ -1393,7 +1345,13 @@ def main():
 
     # Refresh mode: update machinery only, never touch authored content
     if args.refresh:
-        report = refresh_context(target)
+        try:
+            stored = json.loads((target / "context" / "config.json").read_text(errors="replace"))["platform"]
+            platforms = resolve_platform(stored, {}, {})
+        except (KeyError, OSError, json.JSONDecodeError, PlatformError) as e:
+            print(json.dumps({"status": "error", "error": f"refresh requires stored platform: {e}"}))
+            sys.exit(1)
+        report = refresh_context(target, platforms)
         if report.get("status") == "error":
             print(json.dumps(report, indent=2))
             sys.exit(1)
@@ -1408,6 +1366,7 @@ def main():
                 print(f"  - validation: FAIL ({len(report['validate_failures'])} issues — pages may need migration to newer/stricter checks):")
                 for f in report["validate_failures"]:
                     print(f"      {f}")
+        print("  - new session required for managed instruction or hook changes to reload")
         return
 
     # Scan
@@ -1441,7 +1400,8 @@ def main():
 
     # Generate
     try:
-        context_dir = generate_skeleton(target, pages, config=config, scope=args.scope)
+        platforms = resolve_platform(args.platform, os.environ, platform_homes())
+        context_dir = generate_skeleton(target, pages, config=config, scope=args.scope, platforms=platforms)
         imported = absorb_docs(target, context_dir, findings, today_utc()) if args.absorb_docs else []
     except ValueError as e:
         print(json.dumps({"status": "error", "error": str(e)}))
@@ -1450,7 +1410,12 @@ def main():
     print(f"  - {len(list(context_dir.rglob('*.html')))} HTML pages")
     print(f"  - {len(list((context_dir / 'scripts').glob('*.py')))} scripts")
     print(f"  - {len(list((context_dir / 'hooks').glob('*.sh')))} hooks")
-    print(f"  - AGENTS.md and CLAUDE.md bootloader blocks")
+    bootloader_files = []
+    if "codex" in platforms:
+        bootloader_files.append("AGENTS.md")
+    if "claude" in platforms:
+        bootloader_files.append("CLAUDE.md")
+    print(f"  - {' and '.join(bootloader_files)} bootloader blocks")
     print(f"  - config.json")
     print(f"  - runtime-policy.md")
     print(f"  - context/runbooks/ and docs/context/")
@@ -1462,6 +1427,7 @@ def main():
     print(f"  1. Review and fill stub pages with project-specific content")
     print(f"  2. Run: python3 context/scripts/validate.py")
     print(f"  3. For real ledger hardening, have root/elevated/non-agent user run: context/scripts/harden-ledger.sh context")
+    print("  4. Start a new session for managed instructions and hooks to reload")
 
 
 if __name__ == "__main__":

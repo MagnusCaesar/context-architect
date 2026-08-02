@@ -103,13 +103,13 @@ step_output "bootstrap --scan produces JSON" '"root"' \
 
 # Generate mode
 step "bootstrap generates context/" \
-    python3 "$SCRIPTS/bootstrap.py" --target "$TMP"
+    python3 "$SCRIPTS/bootstrap.py" --target "$TMP" --platform both
 step_output "bootstrap reports bootloader files" "AGENTS.md and CLAUDE.md" \
-    python3 "$SCRIPTS/bootstrap.py" --target "$TMP"
+    python3 "$SCRIPTS/bootstrap.py" --target "$TMP" --platform both
 
 BAD_TMP=$(mktemp -d)
 step_output "bootstrap rejects escaping page names" '"status": "error"' \
-    python3 "$SCRIPTS/bootstrap.py" --target "$BAD_TMP" --pages-json '[{"name":"../evil.html","purpose":"bad"}]'
+    python3 "$SCRIPTS/bootstrap.py" --target "$BAD_TMP" --platform codex --pages-json '[{"name":"../evil.html","purpose":"bad"}]'
 python3 - "$BAD_TMP" <<'PY'
 import shutil
 import sys
