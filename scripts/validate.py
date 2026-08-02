@@ -65,33 +65,6 @@ def check_lock_meta(context_root: Path):
     return failures
 
 
-def check_index_coverage(context_root: Path):
-    # A page is "covered" if it is referenced directly in index.html OR reachable
-    # from the index root through the link graph (BFS). This honors the decision-graph
-    # convention: HEAD nodes live in decisions.html and child nodes are reached via
-    # parent links, not enumerated in index.html. Only true orphans fail.
-    failures = []
-    index_path = context_root / "index.html"
-    if not index_path.exists():
-        return ["index.html does not exist"]
-    index_content = index_path.read_text(errors="replace")
-
-    reach = check_reachability(context_root)
-    reachable_names = set()
-    for rel in reach.get("reachable", []):
-        reachable_names.add(Path(rel).name)
-
-    for html_file in html_files(context_root):
-        if html_file.name == "index.html":
-            continue
-        if html_file.name in index_content:
-            continue
-        if html_file.name in reachable_names:
-            continue
-        failures.append(f"{html_file.name}: not referenced in index.html nor reachable via links (orphan)")
-    return failures
-
-
 def check_legacy_decision_fields(context_root: Path):
     """Keep the router's legacy decision-card contract during v2 migration."""
     failures = []
@@ -427,7 +400,6 @@ def main():
         "line_counts": check_line_counts(context_root, max_lines),
         "links": check_links(context_root),
         "lock_meta": check_lock_meta(context_root),
-        "index_coverage": check_index_coverage(context_root),
         "knowledge_graph": validate_graphs(context_root, load_nodes(context_root)),
         "legacy_decision_fields": check_legacy_decision_fields(context_root),
         "router_structure": check_router_structure(context_root),

@@ -69,6 +69,13 @@ def test_legacy_decision_and_failure_remain_readable(tmp_path):
     ]
 
 
+def test_legacy_root_decision_normalizes_without_moving_the_page(tmp_path):
+    root = write_context(tmp_path, {"decisions.html": LEGACY_DECISION_HTML})
+    assert [(node.node_id, node.kind, node.status) for node in load_nodes(root)] == [
+        ("dec-001-cache", "decision", "accepted"),
+    ]
+
+
 def test_archive_indexes_are_not_nodes(tmp_path):
     root = write_context(tmp_path, {
         "decisions/archive.html": "<html><head></head><body></body></html>",

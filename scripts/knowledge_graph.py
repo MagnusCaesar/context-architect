@@ -1,6 +1,7 @@
 """Parse and validate typed context knowledge-graph nodes."""
 
 from dataclasses import dataclass
+from collections import deque
 import html
 from pathlib import Path
 import re
@@ -19,6 +20,13 @@ PATH_KINDS = {
     "failure-todos": "failure",
     "open-questions": "work",
     "workstreams": "work",
+}
+
+ROUTERS = {
+    "wiki": "wiki.html",
+    "decision": "decisions.html",
+    "failure": "failure-todos.html",
+    "work": "workstreams.html",
 }
 
 
@@ -114,17 +122,18 @@ def load_nodes(context_root: Path) -> list[Node]:
         meta = _meta(content)
         path_kind = _path_kind(path.relative_to(context_root))
         is_v2 = meta.get("contract-version") == "2"
-        if not path_kind and not is_v2:
-            continue
         article = re.search(r"<article\b([^>]*)>(.*?)</article>", content, flags=re.I | re.S)
         attrs = _attrs(article.group(1)) if article else {}
         body = article.group(2) if article else content
+        legacy_kind = "decision" if "decision" in attrs.get("class", "").split() else ""
+        if not path_kind and not is_v2 and not legacy_kind:
+            continue
         node_id = _field(attrs, meta, body, "node-id") or _field(attrs, meta, body, "id")
         if not node_id and path_kind:
             node_id = path.stem
         if not node_id:
             continue
-        kind = _field(attrs, meta, body, "kind") or path_kind
+        kind = _field(attrs, meta, body, "kind") or path_kind or legacy_kind or ("wiki" if is_v2 else "")
         if not kind:
             continue
         status = _field(attrs, meta, body, "status").lower() or _default_status(kind)
@@ -153,6 +162,63 @@ def heads(nodes: list[Node], kind: str) -> list[Node]:
     return [node for node in nodes if node.kind == kind and node.parent is None]
 
 
+def _href_paths(context_root: Path, page: Path) -> list[Path]:
+    paths = []
+    for href in re.findall(r'href\s*=\s*(["\'])(.*?)\1', page.read_text(errors="replace"), flags=re.I | re.S):
+        raw = html.unescape(href[1]).split("#", 1)[0].split("?", 1)[0].strip()
+        if not raw or raw.startswith(("/", "mailto:", "http:", "https:")):
+            continue
+        path = (page.parent / raw).resolve()
+        try:
+            path.relative_to(context_root.resolve())
+        except ValueError:
+            continue
+        if path.suffix == ".html" and path.is_file():
+            paths.append(path)
+    return paths
+
+
+def _router_nodes(context_root: Path, kind: str, nodes: list[Node]) -> list[Node]:
+    router = context_root / ROUTERS[kind]
+    if not router.exists():
+        return []
+    graph = re.search(r'<section\b[^>]*(?:id|class)=["\'][^"\']*\bgraph\b[^"\']*["\'][^>]*>(.*?)</section>', router.read_text(errors="replace"), flags=re.I | re.S)
+    if not graph:
+        return []
+    by_path = {node.path.resolve(): node for node in nodes}
+    paths = []
+    for href in re.findall(r'href\s*=\s*(["\'])(.*?)\1', graph.group(1), flags=re.I | re.S):
+        raw = html.unescape(href[1]).split("#", 1)[0].split("?", 1)[0].strip()
+        if not raw:
+            continue
+        path = (router.parent / raw).resolve()
+        if path in by_path and path not in paths:
+            paths.append(path)
+    return [by_path[path] for path in paths]
+
+
+def router_heads(context_root: Path, kind: str) -> list[Node]:
+    """Return live HEAD entries linked in a typed family router."""
+    return [node for node in _router_nodes(context_root, kind, load_nodes(context_root))
+            if node.kind == kind and not node.archived and node.parent is None]
+
+
+def reachable_nodes(context_root: Path, nodes: list[Node] | None = None) -> list[Node]:
+    """Return nodes reached by explicit href BFS from index.html."""
+    index = context_root / "index.html"
+    if not index.exists():
+        return []
+    seen = {index.resolve()}
+    queue = deque([index])
+    while queue:
+        for target in _href_paths(context_root, queue.popleft()):
+            if target not in seen:
+                seen.add(target)
+                queue.append(target)
+    return [node for node in (nodes if nodes is not None else load_nodes(context_root))
+            if node.path.resolve() in seen]
+
+
 def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
     """Return deterministic diagnostics; never modify context files."""
     errors: list[tuple[Path, str]] = []
@@ -171,7 +237,7 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
             continue
         expected_dir = {"wiki": "wiki", "decision": "decisions", "failure": "failure-todos", "work": "workstreams"}.get(node.kind)
         relative = node.path.relative_to(context_root)
-        if expected_dir and (not relative.parts or relative.parts[0] != expected_dir):
+        if expected_dir and relative.parts and relative.parts[0] != expected_dir and not (node.kind == "wiki" and len(relative.parts) == 1):
             errors.append((node.path, f"{node.kind} node stored outside {expected_dir}"))
         if node.status not in STATUSES.get(node.kind, set()):
             errors.append((node.path, f"invalid {node.kind} status {node.status}"))
@@ -215,4 +281,27 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
                 errors.append((node.path, "parent cycle"))
                 break
             chain.append(current)
+
+    for kind, router_name in ROUTERS.items():
+        router = context_root / router_name
+        if not router.exists():
+            continue  # Preserve pre-router contexts.
+        listed = _router_nodes(context_root, kind, nodes)
+        listed_ids = {node.node_id for node in listed}
+        for node in listed:
+            if node.kind != kind:
+                errors.append((router, f"{kind} router links {node.kind} node {node.node_id}"))
+            elif node.archived:
+                errors.append((router, "router contains archived node"))
+            elif node.parent:
+                errors.append((router, f"router contains non-head {node.node_id}"))
+        for node in heads(nodes, kind):
+            if _is_v2(node.path) and not node.archived and node.node_id not in listed_ids:
+                errors.append((router, f"router omits live head {node.node_id}"))
+
+    if (context_root / "index.html").exists():
+        reachable = {node.node_id for node in reachable_nodes(context_root, nodes)}
+        for node in nodes:
+            if _is_v2(node.path) and not node.archived and node.node_id not in reachable:
+                errors.append((node.path, f"unreachable live node {node.node_id}"))
     return [message for _, message in sorted(errors, key=lambda item: (item[0].as_posix(), item[1]))]

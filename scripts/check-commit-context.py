@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from context_utils import find_context_root, ignored, match_tracks, read_config, repo_root, tracks_status
+from knowledge_graph import load_nodes
 
 
 COMMIT_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.I)
@@ -130,25 +131,18 @@ def dl_value(body: str, name: str) -> str:
 
 def affected_decisions(context_root: Path, files: list[str]) -> list[dict]:
     affected = []
-    for path in sorted(context_root.rglob("*.html")):
-        if "archived" in path.parts or "docs" in path.parts:
+    for node in load_nodes(context_root):
+        if node.kind != "decision" or node.archived:
             continue
-        page = path.relative_to(context_root).as_posix()
-        content = path.read_text(errors="replace")
-        for match in re.finditer(r"<article\b([^>]*)>(.*?)</article>", content, flags=re.I | re.S):
-            attrs = parse_attrs(match.group(1))
-            if "decision" not in attrs.get("class", "").split():
-                continue
-            affects = split_list(attrs.get("data-affects", "") or dl_value(match.group(2), "affects"))
-            matches = match_entries(files, affects)
-            if matches:
-                affected.append({
-                    "page": page,
-                    "decision": attrs.get("id", "") or attrs.get("data-id", ""),
-                    "status": attrs.get("data-status", ""),
-                    "affects": affects,
-                    "matched_files": matches,
-                })
+        matches = match_entries(files, list(node.affects))
+        if matches:
+            affected.append({
+                "page": node.path.relative_to(context_root).as_posix(),
+                "decision": node.node_id,
+                "status": node.status,
+                "affects": list(node.affects),
+                "matched_files": matches,
+            })
     return affected
 
 

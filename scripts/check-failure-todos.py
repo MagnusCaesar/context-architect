@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from context_utils import find_context_root
+from knowledge_graph import load_nodes
 
 
 FAILURE_ID_RE = re.compile(r"^failure-\d{3}-[a-z0-9][a-z0-9-]*$")
@@ -133,24 +134,27 @@ def parse_failures(context_root: Path) -> tuple[list[dict], list[str]]:
             merged["pages"] = sorted(set(prior.get("pages", []) + [page]))
             merged["has_authorization"] = prior.get("has_authorization", False) or record["has_authorization"]
             by_id[record["id"]] = merged
+    for node in load_nodes(context_root):
+        if node.kind != "failure" or node.archived:
+            continue
+        page = node.path.relative_to(context_root).as_posix()
+        prior = by_id.get(node.node_id, {})
+        by_id[node.node_id] = {
+            **prior,
+            "id": node.node_id,
+            "page": page,
+            "pages": sorted(set(prior.get("pages", []) + [page])),
+            "status": node.status,
+            "affects": list(node.affects),
+            "topics": prior.get("topics", []),
+            "has_authorization": prior.get("has_authorization", False),
+        }
     return list(by_id.values()), sorted(set(invalid))
 
 
 def parse_decisions(context_root: Path) -> dict[str, str]:
-    decisions = {}
-    for path in sorted(context_root.rglob("*.html")):
-        if "archived" in path.parts or "docs" in path.parts:
-            continue
-        content = path.read_text(errors="replace")
-        for match in re.finditer(r"<article\b([^>]*)>(.*?)</article>", content, flags=re.I | re.S):
-            attrs = parse_attrs(match.group(1))
-            classes = attrs.get("class", "")
-            if "decision" not in classes.split():
-                continue
-            decision_id = attrs.get("id", "") or attrs.get("data-id", "")
-            if decision_id:
-                decisions[decision_id] = (attrs.get("data-status", "") or dl_value(match.group(2), "status")).lower()
-    return decisions
+    return {node.node_id: node.status for node in load_nodes(context_root)
+            if node.kind == "decision" and not node.archived}
 
 
 def variants(value: str) -> set[str]:

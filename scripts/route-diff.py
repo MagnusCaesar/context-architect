@@ -17,6 +17,7 @@ from context_utils import (
     stale_tracks,
     tracks_status,
 )
+from knowledge_graph import load_nodes
 
 
 def changed_files_from_git(root: Path, from_ref: str, to_ref: str) -> list[str]:
@@ -67,23 +68,18 @@ def route_files(context_root: Path, files: list[str]) -> dict:
                 "tracks": tracking["tracks"],
             })
             unmatched.difference_update(matches)
-        content = page_path.read_text(errors="replace")
-        for attrs, _body in re.findall(r'<article\b([^>]*)>(.*?)</article>', content, flags=re.S):
-            if not re.search(r'class="[^"]*\bdecision\b[^"]*"', attrs):
-                continue
-            m = re.search(r'data-tracks="([^"]*)"', attrs)
-            if not m:
-                continue
-            decision_tracks = [part.strip() for part in m.group(1).split(",") if part.strip()]
-            decision_matches = match_tracks(files, decision_tracks)
-            if decision_matches:
-                id_match = re.search(r'id="([^"]+)"', attrs)
-                affected_decisions.append({
-                    "page": page_name,
-                    "decision": id_match.group(1) if id_match else "",
-                    "matched_files": decision_matches,
-                    "tracks": decision_tracks,
-                })
+    for node in load_nodes(context_root):
+        if node.kind != "decision" or node.archived:
+            continue
+        decision_tracks = list(node.tracks)
+        decision_matches = match_tracks(files, decision_tracks)
+        if decision_matches:
+            affected_decisions.append({
+                "page": node.path.relative_to(context_root).as_posix(),
+                "decision": node.node_id,
+                "matched_files": decision_matches,
+                "tracks": decision_tracks,
+            })
 
     return {
         "matched_pages": matched_pages,

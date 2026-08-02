@@ -41,8 +41,11 @@ CORE_PAGES = [
     {"name": "control-plane.html", "purpose": "Runtime workflow checklist", "auto": True},
     {"name": "ledger.html", "purpose": "Concurrency locks, source claims, and history", "auto": True},
     {"name": "agent-tree.html", "purpose": "Advisory agent coordination tree", "auto": True},
+    {"name": "wiki.html", "purpose": "Project knowledge router", "auto": True},
     {"name": "decisions.html", "purpose": "Decision graph and rationale", "auto": True},
     {"name": "failure-todos.html", "purpose": "Scoped unresolved failures and repair routing", "auto": True},
+    {"name": "workstreams.html", "purpose": "Active work router", "auto": True},
+    {"name": "history.html", "purpose": "Historical context and completed work", "auto": True},
     {"name": "open-questions.html", "purpose": "Unresolved assumptions and blocking questions", "auto": True},
     {"name": "reproducibility.html", "purpose": "Setup, tools, environment, and artifact paths", "auto": True},
     {"name": "run-intent.html", "purpose": "Router from intent to runbooks and expected outcomes", "auto": True},
@@ -51,8 +54,10 @@ CORE_PAGES = [
 
 CORE_PAGE_NAMES = {page["name"] for page in CORE_PAGES}
 INDEX_ONLY_PAGES = [
+    {"name": "wiki/archive.html", "purpose": "Archived wiki node index"},
     {"name": "decisions/archive.html", "purpose": "Archived decision node index"},
     {"name": "failure-todos/archive.html", "purpose": "Archived failure todo node index"},
+    {"name": "workstreams/archive.html", "purpose": "Archived work node index"},
     {"name": "open-questions/archive.html", "purpose": "Archived open question node index"},
 ]
 BLOCKED_GENERATED_PAGES = {"rules.html", "source-claims.html"}
@@ -553,7 +558,7 @@ def refresh_context(target: Path) -> dict:
     # Ensure machinery dirs exist (idempotent)
     for d in ("scripts", "hooks", ".locks", "archived", "runbooks"):
         (context_dir / d).mkdir(exist_ok=True)
-    for node_dir in ("decisions", "failure-todos", "open-questions"):
+    for node_dir in ("wiki", "decisions", "failure-todos", "workstreams", "open-questions"):
         (context_dir / node_dir).mkdir(exist_ok=True)
         (context_dir / node_dir / "archived").mkdir(exist_ok=True)
 
@@ -756,7 +761,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     (context_dir / "runbooks").mkdir(exist_ok=True)
     (context_dir / ".locks").mkdir(exist_ok=True)
     (target / "docs" / "context").mkdir(parents=True, exist_ok=True)
-    for node_dir in ("decisions", "failure-todos", "open-questions"):
+    for node_dir in ("wiki", "decisions", "failure-todos", "workstreams", "open-questions"):
         (context_dir / node_dir).mkdir(exist_ok=True)
         (context_dir / node_dir / "archived").mkdir(exist_ok=True)
 
@@ -1077,6 +1082,29 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
 """
     write_atomic(context_dir / "agent-tree.html", agent_tree_html, context_root=context_dir)
 
+    write_simple_page(
+        context_dir,
+        "wiki.html",
+        "Project Wiki",
+        "Router for live project knowledge pages.",
+        """    <section id="graph">
+      <h2>Live Wiki Nodes</h2>
+      <ul>
+      </ul>
+    </section>""",
+        today,
+        [("Index", "./index.html"), ("Archive", "./wiki/archive.html")],
+    )
+    write_simple_page(
+        context_dir,
+        "wiki/archive.html",
+        "Archived Wiki",
+        "Navigation for archived wiki nodes.",
+        """    <section id="archive"><h2>Archived Wiki Nodes</h2><ul></ul></section>""",
+        today,
+        [("Wiki", "../wiki.html"), ("Index", "../index.html")],
+    )
+
     # Generate decisions.html
     decisions_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1099,7 +1127,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
   </header>
 
   <main>
-    <section id="routes">
+    <section id="router-navigation">
       <h2>Routes</h2>
       <table>
         <thead>
@@ -1109,6 +1137,12 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
           <tr><td>Project</td><td><a href="./decisions/">decisions/</a></td><td><a href="./decisions/archive.html">archive</a></td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section id="graph">
+      <h2>Live Decision Heads</h2>
+      <ul>
+      </ul>
     </section>
 
     <section id="decisions">
@@ -1163,8 +1197,8 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
         "failure-todos.html",
         "Failure Todos",
         "Router for scoped unresolved failures and authorized repair work.",
-        """    <section id="failure-routes">
-      <h2>Failure Routes</h2>
+        """    <section id="graph">
+      <h2>Live Failure Heads</h2>
       <table>
         <thead>
           <tr><th>Failure</th><th>Status</th><th>Affects</th><th>Node</th></tr>
@@ -1199,6 +1233,38 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     </section>""",
         today,
         [("Failure Todos", "../failure-todos.html"), ("Index", "../index.html")],
+    )
+
+    write_simple_page(
+        context_dir,
+        "workstreams.html",
+        "Workstreams",
+        "Router for live workstream heads.",
+        """    <section id="graph">
+      <h2>Live Workstream Heads</h2>
+      <ul>
+      </ul>
+    </section>""",
+        today,
+        [("Index", "./index.html"), ("Archive", "./workstreams/archive.html")],
+    )
+    write_simple_page(
+        context_dir,
+        "workstreams/archive.html",
+        "Archived Workstreams",
+        "Navigation for archived workstream nodes.",
+        """    <section id="archive"><h2>Archived Workstream Nodes</h2><ul></ul></section>""",
+        today,
+        [("Workstreams", "../workstreams.html"), ("Index", "../index.html")],
+    )
+    write_simple_page(
+        context_dir,
+        "history.html",
+        "History",
+        "Historical context and completed work.",
+        """    <section id="history"><h2>History</h2><ul></ul></section>""",
+        today,
+        [("Index", "./index.html")],
     )
 
     write_simple_page(
