@@ -1,6 +1,6 @@
 {
   "contractVersion": 1,
-  "defaultRole": "readonly",
+  "defaultRole": "worker",
   "agentRoles": {
     "orchestrator": "orchestrator",
     "system": "orchestrator"

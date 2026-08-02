@@ -18,6 +18,7 @@ from context_utils import (
     context_mutex,
     find_context_root,
     has_permission,
+    MutexTimeout,
     permission_denied,
     read_config,
     read_meta,
@@ -28,6 +29,9 @@ from context_utils import (
     stale_tracks,
     tracks_status,
     write_atomic,
+    write_intent,
+    write_pid_sentinel,
+    contention_break_allowed,
 )
 
 
@@ -115,12 +119,31 @@ def lock_age_minutes(locked_at: str) -> float | None:
     return (datetime.now(timezone.utc) - lock_time).total_seconds() / 60
 
 
-def acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
-    with context_mutex(context_root, f"lock-{page}"):
-        return _acquire_lock(context_root, page, agent_id)
+def acquire_lock(context_root: Path, page: str, agent_id: str, intent: str = "") -> dict:
+    try:
+        ceiling = float(read_config(context_root).get("lockMutexTimeoutSec", 10))
+    except (TypeError, ValueError):
+        ceiling = 10.0
+    try:
+        with context_mutex(context_root, f"lock-{page}"):
+            return _acquire_lock(context_root, page, agent_id, intent)
+    except MutexTimeout:
+        return {
+            "status": "blocked_lock_busy",
+            "acquired": False,
+            "reason": f"lock mutex busy >{ceiling:g}s",
+        }
 
 
-def _acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
+# REVISIT[subagent-hook-inheritance]: Locking is HONOR-SYSTEM for subagents on Claude
+# Code 2.1.201 (verified 2026-07-06). No PreToolUse(Edit|Write) hook fires for Task
+# subagents, so nothing PREVENTS a subagent from editing a page locked by a sibling — it
+# is only discouraged by the CLAUDE.md instruction to run this script first. Subagents
+# also have no AGENT_ID by default; the orchestrator assigns one via the spawn prompt
+# (see the orchestrate skill). If a future version delivers inheritable per-tool hooks to
+# subagents, real enforcement becomes possible — re-run the subagent probe, then INFORM
+# THE USER before removing the manual path.
+def _acquire_lock(context_root: Path, page: str, agent_id: str, intent: str = "") -> dict:
     page_path = resolve_context_page(context_root, page)
     if not page_path.exists():
         result = {
@@ -135,6 +158,19 @@ def _acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
     current_lock = read_meta(page_path, "locked")
     if current_lock == "true":
         locked_by = read_meta(page_path, "locked-by")
+        # Same-owner re-acquire is a no-op success: acquiring a lock you already hold
+        # means "ensure I hold it", not contention. Without this, a same-agent second
+        # acquire falls through to the blocked-intent path and self-blocks. This is the
+        # subagent path (they call start-task.py directly; no PreToolUse hook pre-checks
+        # ownership for them — verified Claude Code 2.1.201).
+        # ponytail: on >=2.1.203 PreToolUse fires for subagents so auto-lock works via
+        # the hook; this manual same-owner path stays as the fallback for older CC and
+        # for direct script calls.
+        if locked_by == agent_id:
+            write_pid_sentinel(context_root, page)
+            result = {"status": "acquired", "acquired": True, "already_held": True}
+            append_ledger_event(context_root, "acquire", page, agent_id, "acquired", "already held by same agent")
+            return result
         locked_at = read_meta(page_path, "locked-at")
         config = read_config(context_root)
         stale_after = int(config.get("staleLockMinutes", 30))
@@ -152,6 +188,7 @@ def _acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
             update_lock_meta(context_root, page_path, agent_id)
             remove_active_lock(context_root, page, locked_by)
             add_active_lock(context_root, page, agent_id)
+            write_pid_sentinel(context_root, page)
             result = {
                 "status": "broke_stale_lock",
                 "acquired": True,
@@ -161,6 +198,25 @@ def _acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
             append_ledger_event(context_root, "acquire", page, agent_id, result["status"], f"previous_owner={locked_by}")
             return result
 
+        # Contention-aware fast break: if owner's heartbeat is stale, take the lock
+        if locked_by != agent_id and contention_break_allowed(context_root, page, locked_by):
+            update_lock_meta(context_root, page_path, agent_id)
+            remove_active_lock(context_root, page, locked_by)
+            add_active_lock(context_root, page, agent_id)
+            write_pid_sentinel(context_root, page)
+            result = {
+                "status": "broke_stale_lock",
+                "acquired": True,
+                "broke_stale": True,
+                "previous_owner": locked_by,
+                "break_reason": "contention_heartbeat_stale",
+            }
+            append_ledger_event(context_root, "acquire", page, agent_id, "contention_break", f"previous_owner={locked_by}")
+            return result
+
+        # Write blocked intent for orchestrator to resolve
+        if intent:
+            write_intent(context_root, page, agent_id, intent, blocked=True)
         result = {
             "status": "blocked_active_lock",
             "acquired": False,
@@ -172,6 +228,9 @@ def _acquire_lock(context_root: Path, page: str, agent_id: str) -> dict:
 
     update_lock_meta(context_root, page_path, agent_id)
     add_active_lock(context_root, page, agent_id)
+    write_pid_sentinel(context_root, page)
+    if intent:
+        write_intent(context_root, page, agent_id, intent)
     result = {"status": "acquired", "acquired": True}
     append_ledger_event(context_root, "acquire", page, agent_id, result["status"], "lock acquired")
     return result
@@ -219,7 +278,7 @@ def main():
 
     task_class = classify_task(args.lines, args.files)
     staleness = check_staleness(context_root, page)
-    lock_status = acquire_lock(context_root, page, args.agent_id)
+    lock_status = acquire_lock(context_root, page, args.agent_id, args.intent)
 
     result = {
         "status": lock_status.get("status"),

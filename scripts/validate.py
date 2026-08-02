@@ -16,12 +16,19 @@ def html_files(context_root: Path):
     for html_file in sorted(context_root.rglob("*.html")):
         if "docs" in html_file.parts:
             continue
+        if ".locks" in html_file.parts:
+            continue
         yield html_file
 
 
 def check_line_counts(context_root: Path, max_lines=200):
+    # ledger.html is a rendered view (bounded by ledgerRenderLimit, rotated by
+    # hygiene), not authored content — exempt from the per-page line limit.
+    exempt = {"ledger.html"}
     failures = []
     for html_file in html_files(context_root):
+        if html_file.name in exempt:
+            continue
         lines = len(html_file.read_text(errors="replace").splitlines())
         if lines > max_lines:
             failures.append(f"{html_file.name}: {lines} lines (max {max_lines})")
@@ -58,16 +65,29 @@ def check_lock_meta(context_root: Path):
 
 
 def check_index_coverage(context_root: Path):
+    # A page is "covered" if it is referenced directly in index.html OR reachable
+    # from the index root through the link graph (BFS). This honors the decision-graph
+    # convention: HEAD nodes live in decisions.html and child nodes are reached via
+    # parent links, not enumerated in index.html. Only true orphans fail.
     failures = []
     index_path = context_root / "index.html"
     if not index_path.exists():
         return ["index.html does not exist"]
     index_content = index_path.read_text(errors="replace")
+
+    reach = check_reachability(context_root)
+    reachable_names = set()
+    for rel in reach.get("reachable", []):
+        reachable_names.add(Path(rel).name)
+
     for html_file in html_files(context_root):
         if html_file.name == "index.html":
             continue
-        if html_file.name not in index_content:
-            failures.append(f"{html_file.name}: not referenced in index.html")
+        if html_file.name in index_content:
+            continue
+        if html_file.name in reachable_names:
+            continue
+        failures.append(f"{html_file.name}: not referenced in index.html nor reachable via links (orphan)")
     return failures
 
 
@@ -208,8 +228,11 @@ def check_ledger_consistency(context_root: Path):
             continue
         if read_meta(page_path, "locked") == "true":
             owner = read_meta(page_path, "locked-by")
-            if (page_path.name, owner) not in locked_in_ledger:
-                failures.append(f"{page_path.name}: locked in meta but missing active ledger row")
+            # Ledger rows are keyed by context-root-relative path (e.g. decisions/dec-002.html),
+            # so match on that — not basename, which collides across subdirectories.
+            rel = page_path.relative_to(context_root).as_posix()
+            if (rel, owner) not in locked_in_ledger and (page_path.name, owner) not in locked_in_ledger:
+                failures.append(f"{rel}: locked in meta but missing active ledger row")
     return failures
 
 
@@ -382,6 +405,111 @@ def check_agent_tree(context_root: Path):
     return failures
 
 
+def check_router_structure(context_root: Path):
+    """Warn if routing tables have an excessive number of inline entries.
+
+    Decision-graph convention: decisions.html holds HEAD-node <article> elements
+    inline and child decisions link from their parents — so inline decision articles
+    in decisions.html are EXPECTED, not an error. Only flag routing tables
+    (open-questions/failure-todos) that have grown too large to stay flat.
+    """
+    failures = []
+    for page_name in ("open-questions.html", "failure-todos.html"):
+        page_path = context_root / page_name
+        if not page_path.exists():
+            continue
+        content = page_path.read_text(errors="replace")
+        inline_count = len(re.findall(r'<article\b', content))
+        if inline_count > 10:
+            failures.append(
+                f"{page_name}: {inline_count} inline entries in routing table (consider splitting into node files)"
+            )
+    return failures
+
+
+def check_decision_edges(context_root: Path):
+    """Validate all decision graph edge types point to valid dec-XXX IDs."""
+    failures = []
+    edge_types = ["data-builds-on", "data-supersedes", "data-resolves", "data-related", "data-affects"]
+
+    # Collect all valid decision IDs
+    decision_ids = set()
+    for html_file in html_files(context_root):
+        meta_decision_id = read_meta(html_file, "decision-id")
+        if meta_decision_id:
+            decision_ids.add(meta_decision_id)
+        elif html_file.parent.name == "decisions" and html_file.stem.startswith("dec-"):
+            decision_ids.add(html_file.stem)
+        content = html_file.read_text(errors="replace")
+        for attrs, _ in re.findall(r'<article\b([^>]*)>(.*?)</article>', content, flags=re.S):
+            if re.search(r'class="[^"]*\bdecision\b[^"]*"', attrs):
+                id_match = re.search(r'id="([^"]+)"', attrs)
+                if id_match:
+                    decision_ids.add(id_match.group(1))
+
+    # Validate all edge references
+    for html_file in html_files(context_root):
+        content = html_file.read_text(errors="replace")
+        for edge in edge_types:
+            for match in re.finditer(rf'{edge}="([^"]+)"', content):
+                refs = [r.strip() for r in match.group(1).split(",") if r.strip()]
+                for ref in refs:
+                    if ref not in decision_ids:
+                        failures.append(f"{html_file.name}: {edge} references unknown '{ref}'")
+    return failures
+
+
+def check_required_meta(context_root: Path):
+    """Every .html page needs required meta fields, with exceptions."""
+    failures = []
+    required_fields = ["title", "created", "updated", "locked", "read-when", "update-when", "tracks"]
+    archive_dir = context_root / "archive"
+    # Graph node files (decisions/failure-todos/open-questions nodes) are not
+    # router/wiki pages — they carry graph meta (builds-on/status/title), not the
+    # read-when/update-when/tracks routing meta. Exempt them from those three.
+    node_dirs = {"decisions", "failure-todos", "open-questions"}
+
+    for html_file in html_files(context_root):
+        is_index = html_file.name == "index.html"
+        is_archive = archive_dir.exists() and archive_dir in html_file.parents
+        # A node file lives directly in a node dir and is not the router page itself
+        # (router pages live at context root, e.g. decisions.html).
+        is_node_file = html_file.parent.name in node_dirs
+
+        for field in required_fields:
+            # index.html doesn't need "locked"
+            if is_index and field == "locked":
+                continue
+            # archive pages exempt from read-when/update-when
+            if is_archive and field in ("read-when", "update-when"):
+                continue
+            # graph node files exempt from router-page routing meta
+            if is_node_file and field in ("read-when", "update-when", "tracks"):
+                continue
+            value = read_meta(html_file, field)
+            if not value:
+                content = html_file.read_text(errors="replace")
+                if f'<meta name="{field}"' not in content:
+                    failures.append(f"{html_file.name}: missing required meta field '{field}'")
+    return failures
+
+
+def check_topic_density(context_root: Path, soft_line_limit=150):
+    """Warn when a page has many h2 sections or is approaching line limit."""
+    warnings = []
+    for html_file in html_files(context_root):
+        if html_file.name == "index.html":
+            continue
+        content = html_file.read_text(errors="replace")
+        h2_count = len(re.findall(r'<h2\b', content))
+        lines = len(content.splitlines())
+        if h2_count > 3:
+            warnings.append(f"{html_file.name}: {h2_count} h2 sections (suggests multiple topics — consider splitting)")
+        if lines > soft_line_limit:
+            warnings.append(f"{html_file.name}: {lines} lines (approaching {soft_line_limit + 50} limit)")
+    return warnings
+
+
 def main():
     parser = argparse.ArgumentParser(description="Validate context/ invariants")
     parser.add_argument("--fix", action="store_true", help="Reserved; no fixes in V1")
@@ -401,6 +529,9 @@ def main():
         "lock_meta": check_lock_meta(context_root),
         "index_coverage": check_index_coverage(context_root),
         "decision_graph": check_decision_graph(context_root),
+        "decision_edges": check_decision_edges(context_root),
+        "router_structure": check_router_structure(context_root),
+        "required_meta": check_required_meta(context_root),
         "ledger_consistency": check_ledger_consistency(context_root),
         "ledger_events": check_ledger_events(context_root),
         "agent_tree": check_agent_tree(context_root),
@@ -411,6 +542,7 @@ def main():
     }
     warnings = {
         "reachability": check_reachability_warnings(context_root),
+        "topic_density": check_topic_density(context_root, soft_line_limit=150),
     }
 
     all_pass = True

@@ -171,8 +171,10 @@ Default roles:
 - `worker`: acquire free locks, release own locks, record itself.
 - `readonly`: run read-only checks only.
 
-Unknown agents default to `readonly`. `agentRoles` in `config.json` maps
-explicit agent IDs to mutating roles.
+Unknown agents default to `worker` so spawned subagents can self-register and
+lock their own page during fan-out. `agentRoles` in `config.json` maps explicit
+agent IDs to other roles — pin an ID to `readonly` to deny it, or to
+`orchestrator` to grant record-any/break-lock/update-tracks.
 
 ## Decision Graph
 
@@ -302,3 +304,5 @@ fetch indexing, and session-memory search. It is not contract authority.
 Scripts in this repository remain authoritative for `tracks`, routing, locks,
 ledger events, agent tree, decisions, reachability/orphan checks, permissions,
 and generated `context/` structure.
+
+**Reading-cost contract:** context pages are read body-only via `context/scripts/extract-body.py` (skill-owned, propagated by refresh); raw `cat`/Read of `context/*.html` is discouraged. For all other gathering and file analysis, context-mode (`ctx_batch_execute`, `ctx_execute_file`, `ctx_search`) is the preferred path so raw bytes never enter agent context. extract-body is always present; context-mode is preferred-when-available.

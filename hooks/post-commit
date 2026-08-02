@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Git post-commit hook for context/ repo.
+# Installed by bootstrap into context/.git/hooks/post-commit
+# Auto-releases locks for committed pages, runs validation, regenerates docs.
+# Always exits 0 — never blocks git commit.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOP="$(git rev-parse --show-toplevel 2>/dev/null)"
+
+# Locate the context dir robustly across both layouts:
+#  - project layout: the repo toplevel IS the context dir (has index.html+scripts)
+#  - firstmate layout: the repo toplevel is the home; context/ is a subdir
+CONTEXT_DIR=""
+for cand in "$TOP" "$TOP/context"; do
+    if [ -f "$cand/index.html" ] && [ -f "$cand/config.json" ] && [ -d "$cand/scripts" ]; then
+        CONTEXT_DIR="$cand"; break
+    fi
+done
+[ -n "$CONTEXT_DIR" ] || exit 0   # not a context repo we understand — do nothing
+
+python3 "$CONTEXT_DIR/scripts/auto-release-on-commit.py" 2>&1 || true
+
+exit 0

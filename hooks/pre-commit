@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Git pre-commit hook installed by context-architecture bootstrap.
+# 1. Scans STAGED content for high-confidence secrets; aborts (exit 1) on match.
+# 2. In the context repo only, also runs validate.py; aborts if it fails.
+# Bypass a false positive with: git commit --no-verify
+# Installed into every repoRoots[].path and the context repo.
+
+set -u
+
+# High-confidence secret patterns (ERE). Kept tight to avoid false positives.
+# Placeholders describe each; no real secret is inlined.
+#   sk-<16+ alnum>            provider-style token
+#   AKIA<16 upper/digit>      AWS access key id
+#   -----BEGIN ... PRIVATE KEY-----
+#   api_key = "..."           quoted api key assignment (case-insensitive)
+PATTERNS='sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy][[:space:]]*[=:][[:space:]]*['"'"'"][^'"'"'"]+['"'"'"]'
+
+found=0
+
+# NUL-delimited so paths with spaces/newlines are safe.
+while IFS= read -r -d '' path; do
+    [ -n "$path" ] || continue
+    # Skip binary files: git diff numstat prints '-\t-' for binary blobs.
+    if git diff --cached --numstat -- "$path" | grep -q '^-'"$(printf '\t')"'-'; then
+        continue
+    fi
+    # Scan the staged blob content (what will actually be committed).
+    hit="$(git show ":$path" 2>/dev/null | grep -nE "$PATTERNS")" || continue
+    if [ -n "$hit" ]; then
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            echo "pre-commit: possible secret in $path:${line%%:*}" >&2
+        done <<EOF
+$hit
+EOF
+        found=1
+    fi
+done < <(git diff --cached --name-only -z --diff-filter=ACM)
+
+if [ "$found" -ne 0 ]; then
+    echo "pre-commit: commit aborted. If this is intentional, bypass with: git commit --no-verify" >&2
+    exit 1
+fi
+
+# --- Resolve CONTEXT_DIR (shared by test gate + validate.py) ---
+TOP="$(git rev-parse --show-toplevel 2>/dev/null)"
+CONTEXT_DIR=""
+for cand in "$TOP" "$TOP/context"; do
+    if [ -f "$cand/index.html" ] && [ -f "$cand/config.json" ] && [ -d "$cand/scripts" ]; then
+        CONTEXT_DIR="$cand"; break
+    fi
+done
+
+# --- Optional project test gate: run testCmd from config, abort on failure ---
+if [ -n "$CONTEXT_DIR" ] && [ -f "$CONTEXT_DIR/config.json" ]; then
+    TESTCMD="$(python3 - "$CONTEXT_DIR/config.json" <<'PY' 2>/dev/null
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("testCmd", "") or "")
+except Exception:
+    print("")
+PY
+)"
+    if [ -n "$TESTCMD" ]; then
+        LOG="$(mktemp -t precommit-test.XXXXXX.log)"
+        if ! sh -c "$TESTCMD" >"$LOG" 2>&1; then
+            echo "pre-commit: tests failed (testCmd: $TESTCMD)" >&2
+            NAMED="$(grep -nE 'FAILED|✗|^not ok|::.*(FAIL|Error)' "$LOG" | head -10)"
+            if [ -n "$NAMED" ]; then
+                echo "--- failing ---" >&2
+                printf '%s\n' "$NAMED" >&2
+            fi
+            echo "--- last 40 lines ---" >&2
+            tail -40 "$LOG" >&2
+            echo "----------------------" >&2
+            echo "commit aborted. Fix the failing tests above (re-run just one, e.g. the named test), or bypass with: git commit --no-verify" >&2
+            echo "full output: $LOG" >&2
+            exit 1
+        fi
+        rm -f "$LOG"
+    fi
+fi
+
+if [ -n "$CONTEXT_DIR" ] && [ -f "$CONTEXT_DIR/scripts/validate.py" ]; then
+    if ! python3 "$CONTEXT_DIR/scripts/validate.py" >&2; then
+        echo "pre-commit: validate.py failed. Fix the context invariants above, or bypass with: git commit --no-verify" >&2
+        exit 1
+    fi
+fi
+
+exit 0

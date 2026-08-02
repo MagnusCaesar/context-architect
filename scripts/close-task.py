@@ -14,10 +14,13 @@ from context_utils import (
     context_mutex,
     find_context_root,
     has_permission,
+    MutexTimeout,
     now_utc,
+    read_config,
     permission_denied,
     read_meta,
     remove_active_lock,
+    remove_pid_sentinel,
     resolve_context_page,
     set_meta_in_content,
     validation_failure_summary,
@@ -26,8 +29,19 @@ from context_utils import (
 
 
 def release_lock(context_root: Path, page: str, agent_id: str) -> dict:
-    with context_mutex(context_root, f"lock-{page}"):
-        return _release_lock(context_root, page, agent_id)
+    try:
+        ceiling = float(read_config(context_root).get("lockMutexTimeoutSec", 10))
+    except (TypeError, ValueError):
+        ceiling = 10.0
+    try:
+        with context_mutex(context_root, f"lock-{page}"):
+            return _release_lock(context_root, page, agent_id)
+    except MutexTimeout:
+        return {
+            "status": "blocked_lock_busy",
+            "released": False,
+            "reason": f"lock mutex busy >{ceiling:g}s",
+        }
 
 
 def _release_lock(context_root: Path, page: str, agent_id: str) -> dict:
@@ -67,6 +81,7 @@ def _release_lock(context_root: Path, page: str, agent_id: str) -> dict:
     content = set_meta_in_content(content, "reviewed-at", now_utc())
     write_atomic(page_path, content, context_root=context_root)
     remove_active_lock(context_root, page, locked_by if forced else agent_id)
+    remove_pid_sentinel(context_root, page)
 
     result = {"status": "released", "released": True, "forced": forced}
     details = f"forced release previous_owner={locked_by}" if forced else "lock released"

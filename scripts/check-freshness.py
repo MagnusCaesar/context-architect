@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -102,6 +103,25 @@ def check_freshness_single(context_root: Path, page: str, root: Path, ignore_pat
         "touched_tracks": touched,
         "stale_tracks": missing_tracks,
     }
+
+
+def check_vendored_drift(context_root, current_commits):
+    """Warn when a page's recorded vendored-commit differs from the current
+    upstream commit. current_commits maps vendored-source -> commit sha.
+    ponytail: caller resolves upstream shas (git -C upstream rev-parse); this
+    fn only compares, so it stays testable without a real upstream checkout."""
+    warns = []
+    for page in sorted(context_root.rglob("*.html")):
+        content = page.read_text(errors="replace")
+        m_commit = re.search(r'<meta name="vendored-commit" content="([^"]*)"', content)
+        m_src = re.search(r'<meta name="vendored-source" content="([^"]*)"', content)
+        if not (m_commit and m_src):
+            continue
+        recorded, src = m_commit.group(1), m_src.group(1)
+        current = current_commits.get(src)
+        if current and current != recorded:
+            warns.append(f"{page.name}: vendored DRIFT {src} recorded={recorded} current={current}")
+    return warns
 
 
 def main():

@@ -310,6 +310,371 @@ def upsert_bootloader(path: Path, title: str) -> None:
     write_atomic(path, updated)
 
 
+CLAUDE_HOOKS_SETTINGS = {
+    "hooks": {
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "bash context/hooks/remind-capture-decision.sh",
+                    }
+                ],
+            }
+        ],
+        "PreToolUse": [
+            {
+                "matcher": "Edit|Write",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "bash context/hooks/pre-edit-context-inject.sh",
+                    }
+                ],
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Edit|Write",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "bash context/hooks/post-edit-validate-and-stale.sh",
+                    }
+                ],
+            }
+        ],
+    }
+}
+
+_STOP_HOOK = {
+    "Stop": [
+        {"hooks": [
+            {"type": "command", "command": "bash context/hooks/capture-on-stop.sh"},
+            {"type": "command", "command": "bash context/hooks/auto-commit-context.sh"},
+        ]}
+    ]
+}
+# Commit context when a SUBAGENT finishes editing too (subagents do most edits;
+# whoever held the lock commits when they finish, which releases the lock).
+_SUBAGENT_STOP_HOOK = {
+    "SubagentStop": [
+        {"hooks": [
+            {"type": "command", "command": "bash context/hooks/auto-commit-context.sh"},
+        ]}
+    ]
+}
+_SESSION_START_HOOK = {
+    "SessionStart": [
+        {"hooks": [{"type": "command",
+                    "command": "bash context/hooks/session-start-inject.sh"}]}
+    ]
+}
+_SUBAGENT_START_HOOK = {
+    "SubagentStart": [
+        {"hooks": [{"type": "command",
+                    "command": "bash context/hooks/subagent-start-inject.sh"}]}
+    ]
+}
+_READ_DIRECTION_UPS = {"type": "command",
+                       "command": "bash context/hooks/remind-context-read.sh"}
+_READ_DIRECTION_POST = {
+    "matcher": "Read",
+    "hooks": [{"type": "command",
+               "command": "bash context/hooks/post-read-context-gate.sh"}]
+}
+
+def hooks_for_scope(scope: str) -> dict:
+    """Return the hooks dict to register for the given scope."""
+    hooks = json.loads(json.dumps(CLAUDE_HOOKS_SETTINGS["hooks"]))  # deep copy
+    hooks.update(_STOP_HOOK)                 # both scopes capture + commit on Stop
+    hooks.update(_SUBAGENT_STOP_HOOK)        # commit when a subagent finishes editing
+    hooks.update(_SUBAGENT_START_HOOK)       # both scopes inject into subagents
+    # read-direction: append remind-context-read to UserPromptSubmit, add Read gate
+    hooks["UserPromptSubmit"][0]["hooks"].append(dict(_READ_DIRECTION_UPS))
+    hooks.setdefault("PostToolUse", []).append(dict(_READ_DIRECTION_POST))
+    if scope == "global":
+        hooks.update(_SESSION_START_HOOK)    # global also injects at session start
+    # Final deep copy so the returned dict shares no nested objects with the
+    # module-level fragments spliced in above (the contract is "independent dict").
+    return json.loads(json.dumps(hooks))
+
+
+def absolutize_hooks(hooks: dict, target: Path) -> dict:
+    """Rewrite 'bash context/hooks/X' commands to absolute paths.
+
+    Hooks fire with the session's cwd, which is not always the project root, so
+    relative 'context/hooks/...' fails from any subdir. Anchor them to target.
+    """
+    prefix = "bash context/hooks/"
+    abs_base = f"bash {target.resolve()}/context/hooks/"
+    for groups in hooks.values():
+        for g in groups:
+            for h in g.get("hooks", []):
+                cmd = h.get("command", "")
+                if cmd.startswith(prefix):
+                    h["command"] = abs_base + cmd[len(prefix):]
+    return hooks
+
+
+def install_git_hook(repo_dir: Path, hooks_src: Path, name: str) -> bool:
+    """Install a named git hook into repo_dir's real hooks dir.
+
+    Asks git for the hooks path so it works whether context/ is its own repo
+    (project layout) or a subdir of the repo (firstmate-home layout). Returns
+    True if installed.
+    """
+    src = hooks_src / name
+    if not src.exists():
+        return False
+    try:
+        # --absolute-git-dir is unambiguous across layouts (no cwd-relative paths).
+        r = subprocess.run(
+            ["git", "rev-parse", "--absolute-git-dir"],
+            capture_output=True, text=True, cwd=str(repo_dir), timeout=5,
+        )
+        if r.returncode != 0:
+            return False
+        hp = Path(r.stdout.strip()) / "hooks"
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    hp.mkdir(parents=True, exist_ok=True)
+    dst = hp / name
+    shutil.copy2(src, dst)
+    dst.chmod(0o755)
+    return True
+
+
+def install_post_commit(context_dir: Path, hooks_src: Path) -> bool:
+    """Install the post-commit hook into the context repo's hooks dir."""
+    return install_git_hook(context_dir, hooks_src, "post-commit")
+
+
+def install_pre_commit(context_dir: Path, hooks_src: Path, config: dict | None) -> list[str]:
+    """Install the pre-commit hook (secret-scan + context validate).
+
+    Installs into the context repo AND each repoRoots[].path (resolved against
+    the project root, i.e. context_dir.parent). The hook itself detects at
+    runtime whether it is running in the context repo or a plain code repo.
+    Returns the list of repo dirs where it was installed (deduped by git dir).
+    """
+    installed = []
+    seen_gitdirs = set()
+    project_root = context_dir.parent
+    roots = [context_dir]
+    if config:
+        for rr in config.get("repoRoots", []):
+            p = rr.get("path") if isinstance(rr, dict) else None
+            if p:
+                roots.append((project_root / p).resolve())
+    for repo_dir in roots:
+        try:
+            gd = subprocess.run(
+                ["git", "rev-parse", "--absolute-git-dir"],
+                capture_output=True, text=True, cwd=str(repo_dir), timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if gd.returncode != 0:
+            continue
+        key = gd.stdout.strip()
+        if key in seen_gitdirs:
+            continue
+        seen_gitdirs.add(key)
+        if install_git_hook(repo_dir, hooks_src, "pre-commit"):
+            installed.append(str(repo_dir))
+    return installed
+
+
+def detect_platform() -> str:
+    """Detect whether running under Claude Code or Codex."""
+    if os.environ.get("CLAUDE_CODE") or Path.home().joinpath(".claude").is_dir():
+        return "claude"
+    if os.environ.get("CODEX") or Path.home().joinpath(".codex").is_dir():
+        return "codex"
+    skill_path = str(SKILL_ROOT)
+    if ".claude" in skill_path:
+        return "claude"
+    if ".codex" in skill_path:
+        return "codex"
+    return "claude"
+
+
+def install_platform_hooks(target: Path, scope: str = "project") -> None:
+    """Install hooks appropriate for the detected platform.
+
+    Claude Code: auto-creates .claude/settings.json with stdin-based wrapper hooks.
+    Codex: hooks are copied to context/hooks/ but not auto-installed (Codex agents
+    read the install comment in each hook script and AGENTS.md bootloader instructions).
+    """
+    platform = detect_platform()
+    if platform != "claude":
+        return
+    claude_dir = target / ".claude"
+    claude_dir.mkdir(exist_ok=True)
+    settings_path = claude_dir / "settings.json"
+    new_hooks = absolutize_hooks(hooks_for_scope(scope), target)
+    if settings_path.exists():
+        existing = json.loads(settings_path.read_text(errors="replace"))
+        if "hooks" in existing:
+            return  # idempotent guard preserved
+        existing["hooks"] = new_hooks
+        write_atomic(settings_path, json.dumps(existing, indent=2) + "\n")
+    else:
+        write_atomic(settings_path, json.dumps({"hooks": new_hooks}, indent=2) + "\n")
+
+
+SELF_HEALING_CONFIG_DEFAULTS = {
+    "staleLockMinutes": 30,
+    "autoAcquireOnEdit": True,
+    "autoReleaseOnCommit": True,
+    "autoReleaseIdleMinutes": 1440,
+    "contentionBreakMinutes": 3,
+    "lockMutexTimeoutSec": 10,
+    "scope": "project",
+    "autoCommitContext": True,
+}
+
+
+def refresh_context(target: Path) -> dict:
+    """Idempotently refresh skill-owned machinery in an existing context/ dir.
+
+    Updates scripts, hooks, git post-commit, .gitignore, settings.json hooks, and
+    adds any missing self-healing config keys. Never touches authored content
+    (index.html, decisions/, failure-todos/, open-questions/, ledger) or existing
+    config values. Runs validate.py and returns a structured report.
+    """
+    context_dir = target / "context"
+    if not (context_dir / "index.html").exists():
+        return {"status": "error", "error": f"{context_dir}/index.html not found — not a context-arch dir; run full bootstrap first"}
+
+    updated = []
+
+    # Ensure machinery dirs exist (idempotent)
+    for d in ("scripts", "hooks", ".locks", "archived", "runbooks"):
+        (context_dir / d).mkdir(exist_ok=True)
+    for node_dir in ("decisions", "failure-todos", "open-questions"):
+        (context_dir / node_dir).mkdir(exist_ok=True)
+        (context_dir / node_dir / "archived").mkdir(exist_ok=True)
+
+    # Copy skill scripts (overwrite — these are skill-owned, not authored)
+    scripts_src = SKILL_ROOT / "scripts"
+    scripts_dst = context_dir / "scripts"
+    for script in list(scripts_src.glob("*.py")) + list(scripts_src.glob("*.sh")):
+        if script.name != "bootstrap.py":
+            shutil.copy2(script, scripts_dst / script.name)
+            updated.append(f"scripts/{script.name}")
+
+    runtime_policy = TEMPLATES_DIR / "runtime-policy.md"
+    if runtime_policy.exists():
+        shutil.copy2(runtime_policy, context_dir / "runtime-policy.md")
+        updated.append("runtime-policy.md")
+
+    # Copy skill hooks (overwrite)
+    hooks_src = SKILL_ROOT / "hooks"
+    hooks_dst = context_dir / "hooks"
+    if hooks_src.exists():
+        for hook in hooks_src.glob("*.sh"):
+            shutil.copy2(hook, hooks_dst / hook.name)
+            updated.append(f"hooks/{hook.name}")
+
+    # Install/refresh git post-commit hook
+    if install_post_commit(context_dir, hooks_src):
+        updated.append("git post-commit hook")
+
+    # Install/refresh git pre-commit hook (secret-scan + validate) into
+    # the context repo and every repoRoots[].path.
+    _pc_cfg = None
+    _pc_cfg_path = context_dir / "config.json"
+    if _pc_cfg_path.exists():
+        try:
+            _pc_cfg = json.loads(_pc_cfg_path.read_text(errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    if install_pre_commit(context_dir, hooks_src, _pc_cfg):
+        updated.append("git pre-commit hook")
+
+    # Ensure .gitignore has .locks/
+    ctx_gitignore = context_dir / ".gitignore"
+    if not ctx_gitignore.exists():
+        write_atomic(ctx_gitignore, ".locks/\nledger-archive/\n", context_root=context_dir)
+        updated.append(".gitignore")
+    else:
+        gi_content = ctx_gitignore.read_text()
+        if ".locks/" not in gi_content:
+            write_atomic(ctx_gitignore, gi_content.rstrip() + "\n.locks/\n", context_root=context_dir)
+            updated.append(".gitignore")
+
+    # Merge missing self-healing config keys (preserve existing values)
+    config_path = context_dir / "config.json"
+    config_added = []
+    if config_path.exists():
+        cfg = json.loads(config_path.read_text(errors="replace"))
+        for k, v in SELF_HEALING_CONFIG_DEFAULTS.items():
+            if k not in cfg:
+                cfg[k] = v
+                config_added.append(k)
+        if config_added:
+            write_atomic(config_path, json.dumps(cfg, indent=2) + "\n", context_root=context_dir)
+            updated.append(f"config.json (+{','.join(config_added)})")
+
+    # Force-update settings.json hooks (install_platform_hooks refuses if hooks exist)
+    if detect_platform() == "claude":
+        claude_dir = target / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        settings_path = claude_dir / "settings.json"
+        if settings_path.exists():
+            existing = json.loads(settings_path.read_text(errors="replace"))
+        else:
+            existing = {}
+        # Read stored scope so refresh preserves global hooks (SessionStart+Stop)
+        _cfg_path = context_dir / "config.json"
+        _scope = "project"
+        if _cfg_path.exists():
+            try:
+                _scope = json.loads(_cfg_path.read_text(errors="replace")).get("scope", "project")
+            except (json.JSONDecodeError, OSError):
+                pass
+        existing["hooks"] = absolutize_hooks(hooks_for_scope(_scope), context_dir.parent)
+        write_atomic(settings_path, json.dumps(existing, indent=2) + "\n")
+        updated.append(".claude/settings.json (hooks)")
+
+    # Re-render managed bootloader block (marker-delimited; authored prose untouched)
+    for _bl in install_bootloaders(target):
+        updated.append(_bl)
+
+    # Run validation, capture failures
+    validate_script = scripts_dst / "validate.py"
+    validate_failures = []
+    validate_ran = False
+    if validate_script.exists():
+        try:
+            result = subprocess.run(
+                [sys.executable, str(validate_script)],
+                capture_output=True, text=True, cwd=str(target), timeout=60,
+            )
+            validate_ran = True
+            validate_passed = result.returncode == 0
+            for line in result.stdout.splitlines():
+                if line.startswith("FAIL:") or line.strip().startswith("- "):
+                    validate_failures.append(line.strip())
+        except (subprocess.TimeoutExpired, OSError) as e:
+            validate_passed = False
+            validate_failures.append(f"validate.py error: {e}")
+    else:
+        validate_passed = None
+
+    return {
+        "status": "refreshed",
+        "target": str(target),
+        "updated": updated,
+        "config_keys_added": config_added,
+        "validate_ran": validate_ran,
+        "validate_passed": validate_passed,
+        "validate_failures": validate_failures,
+    }
+
+
 def install_bootloaders(target: Path) -> list[str]:
     written = []
     for filename, title in (("AGENTS.md", "Agent Instructions"), ("CLAUDE.md", "Claude Instructions")):
@@ -380,7 +745,7 @@ def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> 
     return imported
 
 
-def generate_skeleton(target: Path, pages: list, config: dict = None):
+def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str = "project"):
     """Generate the full context/ directory structure."""
     pages = normalize_pages(pages)
     context_dir = target / "context"
@@ -389,6 +754,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
     (context_dir / "hooks").mkdir(exist_ok=True)
     (context_dir / "archived").mkdir(exist_ok=True)
     (context_dir / "runbooks").mkdir(exist_ok=True)
+    (context_dir / ".locks").mkdir(exist_ok=True)
     (target / "docs" / "context").mkdir(parents=True, exist_ok=True)
     for node_dir in ("decisions", "failure-todos", "open-questions"):
         (context_dir / node_dir).mkdir(exist_ok=True)
@@ -409,16 +775,41 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
         for hook in hooks_src.glob("*.sh"):
             shutil.copy2(hook, hooks_dst / hook.name)
 
+    # Install git post-commit hook for auto-release
+    install_post_commit(context_dir, hooks_src)
+
+    # Install git pre-commit hook (secret-scan + validate) into the context
+    # repo and every repoRoots[].path.
+    install_pre_commit(context_dir, hooks_src, config)
+
+    # Create .gitignore for .locks/ (ephemeral sentinels)
+    ctx_gitignore = context_dir / ".gitignore"
+    if not ctx_gitignore.exists():
+        write_atomic(ctx_gitignore, ".locks/\nledger-archive/\n", context_root=context_dir)
+    else:
+        gi_content = ctx_gitignore.read_text()
+        if ".locks/" not in gi_content:
+            write_atomic(ctx_gitignore, gi_content.rstrip() + "\n.locks/\n", context_root=context_dir)
+
     # Generate config.json
     config_data = config or {
         "projectName": target.name,
         "maxLinesPerPage": 200,
         "repoRoots": [{"path": ".", "label": "main"}],
         "staleLockMinutes": 30,
+        "autoAcquireOnEdit": True,
+        "autoReleaseOnCommit": True,
+        "autoReleaseIdleMinutes": 1440,
+        "contentionBreakMinutes": 3,
+        "lockMutexTimeoutSec": 10,
         "ledgerRenderLimit": 75,
         "autoGenerateDocs": True,
         "ignoreTracks": ["build/**", "dist/**", "vendor/**", "node_modules/**"],
+        "scope": scope,
+        "autoCommitContext": True,
     }
+    # If a config was passed in explicitly, still stamp scope on it:
+    config_data.setdefault("scope", scope)
     permission_defaults = load_permission_defaults()
     for key in ("defaultRole", "agentRoles", "permissionProfiles"):
         if key in permission_defaults:
@@ -448,6 +839,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
   <meta name="created" content="{today}">
   <meta name="updated" content="{today}">
   <meta name="read-when" content="Starting any task in this project">
+  <meta name="update-when" content="Pages are added, removed, or reorganized">
   <meta name="tracks" content="context-only">
 </head>
 <body>
@@ -976,6 +1368,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None):
             write_atomic(page_path, stub_html, context_root=context_dir)
 
     install_bootloaders(target)
+    install_platform_hooks(target, scope=scope)
     return context_dir
 
 
@@ -987,12 +1380,35 @@ def main():
     parser.add_argument("--config", help="Path to config JSON with page list")
     parser.add_argument("--pages-json", help="JSON string of pages to generate")
     parser.add_argument("--absorb-docs", action="store_true", help="Import headed docs into context pages and archive copies")
+    parser.add_argument("--refresh", action="store_true", help="Idempotently refresh skill machinery in an existing context/ dir (preserves authored content + config values)")
+    parser.add_argument("--scope", choices=["project", "global"], default="project",
+                        help="project = standard per-project context (default); "
+                             "global = first-mate cross-project context instance")
     args = parser.parse_args()
 
     target = Path(args.target).resolve()
     if not target.is_dir():
         print(f"ERROR: {target} is not a directory")
         sys.exit(1)
+
+    # Refresh mode: update machinery only, never touch authored content
+    if args.refresh:
+        report = refresh_context(target)
+        if report.get("status") == "error":
+            print(json.dumps(report, indent=2))
+            sys.exit(1)
+        print(f"Refreshed context/ at {report['target']}")
+        print(f"  - {len(report['updated'])} machinery files updated")
+        if report.get("config_keys_added"):
+            print(f"  - config keys added: {', '.join(report['config_keys_added'])}")
+        if report.get("validate_ran"):
+            if report["validate_passed"]:
+                print("  - validation: PASS")
+            else:
+                print(f"  - validation: FAIL ({len(report['validate_failures'])} issues — pages may need migration to newer/stricter checks):")
+                for f in report["validate_failures"]:
+                    print(f"      {f}")
+        return
 
     # Scan
     findings = scan_repo(target)
@@ -1025,7 +1441,7 @@ def main():
 
     # Generate
     try:
-        context_dir = generate_skeleton(target, pages, config)
+        context_dir = generate_skeleton(target, pages, config=config, scope=args.scope)
         imported = absorb_docs(target, context_dir, findings, today_utc()) if args.absorb_docs else []
     except ValueError as e:
         print(json.dumps({"status": "error", "error": str(e)}))

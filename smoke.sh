@@ -126,6 +126,7 @@ data = json.loads(p.read_text())
 roles = data.setdefault("agentRoles", {})
 for agent in ["smoke-agent", "other-agent", "stale-owner", "stale-breaker", "warn-agent", "worker-1"]:
     roles[agent] = "worker"
+roles["readonly-agent"] = "readonly"
 p.write_text(json.dumps(data, indent=2) + "\n")
 PY
 
@@ -170,7 +171,7 @@ step "config.json exists" test -f "$TMP/context/config.json"
 step "runtime-policy.md exists" test -f "$TMP/context/runtime-policy.md"
 step "scripts/ populated" test -f "$TMP/context/scripts/validate.py"
 step "new operational scripts copied" test -f "$TMP/context/scripts/source-claim.py"
-step "hooks/ populated" test -f "$TMP/context/hooks/pre-edit-lock-check.sh"
+step "hooks/ populated" test -f "$TMP/context/hooks/pre-edit-context-gate.sh"
 step "harden-ledger helper copied" test -f "$TMP/context/scripts/harden-ledger.sh"
 step "check-hardening helper copied" test -f "$TMP/context/scripts/check-hardening.py"
 step_json_file "repo root is portable" "$TMP/context/config.json" "data['repoRoots'][0]['path'] == '.'"
@@ -181,12 +182,16 @@ echo "Phase 2: Task lifecycle"
 step_output "start-task rejects path traversal" '"status": "error"' \
     python3 "$TMP/context/scripts/start-task.py" --page ../outside.html --intent "bad path" --agent-id smoke-agent
 
-step_output "unknown agent cannot acquire lock" '"status": "permission_denied"' \
-    python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "unknown" --agent-id unknown-agent
+step_output "readonly agent cannot acquire lock" '"status": "permission_denied"' \
+    python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "readonly" --agent-id readonly-agent
 
 # Start task (acquire lock)
 step_output "start-task acquires lock" '"acquired": true' \
     python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "smoke test" --agent-id smoke-agent
+
+# Same-owner re-acquire is an idempotent no-op success, NOT a self-block (subagent path).
+step_output "same-owner re-acquire is idempotent success" '"already_held": true' \
+    python3 "$TMP/context/scripts/start-task.py" --page decisions.html --intent "smoke test again" --agent-id smoke-agent
 
 step_output "daily hygiene auto-runs before first ledger event" 'data-event="daily_hygiene"' \
     grep -o 'data-event="daily_hygiene"' "$TMP/context/ledger.html"
