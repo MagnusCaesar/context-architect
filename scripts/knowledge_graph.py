@@ -84,6 +84,27 @@ def _is_v2(path: Path) -> bool:
     return _meta(path.read_text(errors="replace")).get("contract-version") == "2"
 
 
+def _reference_id(reference: str) -> str:
+    return reference.rsplit("#", 1)[-1] if "#" in reference else reference
+
+
+def _link_errors(context_root: Path, node: Node, reference: str) -> list[str]:
+    if "#" not in reference or "://" in reference:
+        return []
+    file_name, fragment = reference.rsplit("#", 1)
+    target = node.path if not file_name else (node.path.parent / file_name).resolve()
+    try:
+        target.relative_to(context_root.resolve())
+    except ValueError:
+        return [f"missing link file {file_name}"]
+    if not target.is_file():
+        return [f"missing link file {file_name}"]
+    content = target.read_text(errors="replace")
+    if not re.search(rf'\bid\s*=\s*(["\']){re.escape(fragment)}\1', content) and _meta(content).get("node-id") != fragment:
+        return [f"missing link fragment {fragment}"]
+    return []
+
+
 def load_nodes(context_root: Path) -> list[Node]:
     nodes = []
     for path in sorted(context_root.rglob("*.html")):
@@ -134,7 +155,6 @@ def heads(nodes: list[Node], kind: str) -> list[Node]:
 
 def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
     """Return deterministic diagnostics; never modify context files."""
-    del context_root
     errors: list[tuple[Path, str]] = []
     by_id: dict[str, list[Node]] = {}
     for node in nodes:
@@ -150,24 +170,31 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
         if not _is_v2(node.path):
             continue
         expected_dir = {"wiki": "wiki", "decision": "decisions", "failure": "failure-todos", "work": "workstreams"}.get(node.kind)
-        if expected_dir and expected_dir not in node.path.parts:
+        relative = node.path.relative_to(context_root)
+        if expected_dir and (not relative.parts or relative.parts[0] != expected_dir):
             errors.append((node.path, f"{node.kind} node stored outside {expected_dir}"))
         if node.status not in STATUSES.get(node.kind, set()):
             errors.append((node.path, f"invalid {node.kind} status {node.status}"))
         if not node.statement:
             errors.append((node.path, "missing durable statement"))
+        references = ((node.parent,) if node.parent else ()) + node.children + node.related + node.tracks + node.affects
+        for reference in references:
+            for message in _link_errors(context_root, node, reference):
+                errors.append((node.path, message))
         if node.parent:
-            parent = one.get(node.parent)
+            parent_id = _reference_id(node.parent)
+            parent = one.get(parent_id)
             if not parent:
-                errors.append((node.path, f"unknown parent {node.parent}"))
+                errors.append((node.path, f"unknown parent {parent_id}"))
             else:
                 if parent.kind != node.kind:
                     errors.append((node.path, f"{node.kind} node parent must be {node.kind}"))
                 if not node.archived and parent.archived:
                     errors.append((node.path, "live node cannot use archived parent"))
-                if node.node_id not in parent.children:
+                if node.node_id not in {_reference_id(child) for child in parent.children}:
                     errors.append((node.path, "parent/child link is not reciprocal"))
-        for child_id in node.children:
+        for child_ref in node.children:
+            child_id = _reference_id(child_ref)
             child = one.get(child_id)
             if not child:
                 errors.append((node.path, f"unknown child {child_id}"))
@@ -180,8 +207,8 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
             continue
         chain = []
         current = node
-        while current.parent and current.parent in one:
-            current = one[current.parent]
+        while current.parent and _reference_id(current.parent) in one:
+            current = one[_reference_id(current.parent)]
             if current.node_id in chain or current.node_id == node.node_id:
                 cycle_members.update(item.node_id for item in chain)
                 cycle_members.add(current.node_id)

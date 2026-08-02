@@ -19,6 +19,14 @@ LEGACY_QUESTION_HTML = """<!doctype html><html><head>
 <meta name="status" content="backlog">
 </head><body><article id="question-001-api"><p>Which API is stable?</p></article></body></html>"""
 
+LEGACY_DECISION_HTML = """<!doctype html><html><head>
+<meta name="status" content="accepted">
+</head><body><article class="decision" id="dec-001-cache"><p>Use the existing cache.</p></article></body></html>"""
+
+LEGACY_FAILURE_HTML = """<!doctype html><html><head>
+<meta name="status" content="blocked">
+</head><body><article id="failure-001-cache"><p>Cache invalidation is blocked.</p></article></body></html>"""
+
 
 def write_context(tmp_path, files):
     root = tmp_path / "context"
@@ -48,6 +56,17 @@ def test_legacy_open_question_normalizes_as_work_question(tmp_path):
     node = load_nodes(root)[0]
     assert node.kind == "work"
     assert node.status == "backlog"
+
+
+def test_legacy_decision_and_failure_remain_readable(tmp_path):
+    root = write_context(tmp_path, {
+        "decisions/dec-001-cache.html": LEGACY_DECISION_HTML,
+        "failure-todos/failure-001-cache.html": LEGACY_FAILURE_HTML,
+    })
+    assert [(node.node_id, node.kind, node.status) for node in load_nodes(root)] == [
+        ("dec-001-cache", "decision", "accepted"),
+        ("failure-001-cache", "failure", "blocked"),
+    ]
 
 
 def test_archive_indexes_are_not_nodes(tmp_path):
@@ -154,4 +173,28 @@ def test_graph_diagnostics_sort_by_path_then_message(tmp_path):
     assert validate_graphs(root, load_nodes(root)) == [
         "missing durable statement",
         "invalid work status proposed",
+    ]
+
+
+def test_v2_links_require_existing_file_and_fragment(tmp_path):
+    root = write_context(tmp_path, {
+        "workstreams/work-001-source.html": v2_node(
+            "work-001-source", "work", "active",
+            related="missing.html#work-999-missing,work-002-target.html#work-999-missing",
+            tracks="src/**/*.py",
+        ),
+        "workstreams/work-002-target.html": v2_node("work-002-target", "work", "active"),
+    })
+    assert validate_graphs(root, load_nodes(root)) == [
+        "missing link file missing.html",
+        "missing link fragment work-999-missing",
+    ]
+
+
+def test_v2_node_requires_canonical_family_root(tmp_path):
+    root = write_context(tmp_path, {
+        "misc/decisions/dec-001-cache.html": v2_node("dec-001-cache", "decision", "accepted"),
+    })
+    assert validate_graphs(root, load_nodes(root)) == [
+        "decision node stored outside decisions",
     ]
