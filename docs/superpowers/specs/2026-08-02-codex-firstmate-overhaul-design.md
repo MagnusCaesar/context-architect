@@ -34,6 +34,32 @@ remain authoritative where the archive does not intentionally replace them.
 Use one shared deterministic core with thin Claude and Codex adapters. Do not
 fork the project by harness and do not introduce a plugin framework.
 
+### Invisible Control Plane
+
+Context hygiene is machinery, not model curriculum. In normal operation the
+model must not learn the graph schema, mutex protocol, ledger format, freshness
+algorithm, receipt format, consolidation heuristic, hook wiring, or migration
+rules. Hooks and scripts perform that work deterministically.
+
+The model receives a small task capsule containing only:
+
+- the task and expected result;
+- relevant durable facts and accepted decisions;
+- applicable failure or workstream blockers;
+- allowed or affected paths when scope matters;
+- links to the few context nodes needed for deeper exploration.
+
+It does not receive the whole router, graph, ledger, registry, archive, or
+hygiene report. A control-plane failure is translated into one actionable
+message such as which page is locked, which prerequisite is missing, or which
+validation must be repaired. Diagnostic detail remains in files for explicit
+inspection.
+
+Only degraded mode exposes process instructions. If verified lifecycle hooks
+are unavailable, bootstrap supplies a short banner naming the exact manual
+command required for the current step. It does not inject the full operating
+manual.
+
 The shared core continues to own:
 
 - context pages, locks, ledgers, decisions, failures, routing, and freshness;
@@ -192,7 +218,12 @@ Claude-specific tool names and slash commands never appear in the Codex block;
 Codex-specific collaboration or `ctx_*` names never appear in the Claude block.
 
 The main skill stays concise. Detailed platform contracts live in documentation
-and are loaded through progressive disclosure.
+and are loaded through progressive disclosure only when diagnosing or changing
+the control plane. Routine task agents receive task capsules instead.
+
+Instruction discovery is treated as session-scoped. Refresh reports when a new
+session is required for managed `AGENTS.md`, `CLAUDE.md`, hook, or agent-profile
+changes to become effective.
 
 ## Hook Adapter
 
@@ -249,6 +280,11 @@ ${XDG_DATA_HOME:-$HOME/.local/share}/context-architecture/firstmate
 deprecated compatibility alias during migration. Existing Claude data is copied
 only by an explicit migration command; no source directory is deleted.
 
+Firstmate is private by default. Startup context contains registered project
+names, roots, and short status summaries only. It never injects another
+project's nodes, captures, paths outside its registered root, or repository
+contents without explicit routing for the current task.
+
 Global bootstrap creates the registry, capture inbox, configuration, and
 validation state. It does not initialize a Git repository unless `--init-git`
 is explicitly passed. When Git automation is unavailable, bootstrap reports
@@ -270,6 +306,30 @@ Firstmate lifecycle on Codex:
 Registry generation owns a marker-delimited section. Project bootstrap updates
 that section deterministically; users do not paste generated HTML manually.
 Authored registry content outside the section survives refresh.
+
+## Model Visibility and Receipts
+
+Normal model-visible context follows four bounded tiers:
+
+| Event | Visible content |
+| --- | --- |
+| Session start or post-compact | Project identity, task if active, critical blocker summaries, entry links |
+| Task start | Relevant HEAD and the smallest routed child set |
+| Subagent start | Role, scope, allowed paths, expected result, relevant node links |
+| Blocked operation | One actionable reason and the next permitted action |
+
+Archives, unrelated HEADs, sibling project contents, full ledgers, graph
+diagnostics, and hygiene internals are excluded by default. No event injects a
+complete HTML page when a summary and link are sufficient.
+
+The control plane records a non-model-visible task receipt containing the node
+IDs, content hashes, and timestamps used to build each task capsule. Receipts
+make context delivery auditable without spending model context on bookkeeping.
+They are ledger evidence, not another authored knowledge graph.
+
+Hooks enforce an explicit output budget and spill diagnostics to a referenced
+file. Post-compaction restoration rebuilds the active task capsule from the
+receipt and current node hashes; it does not replay historical hygiene output.
 
 ## Model Policy
 
@@ -319,10 +379,15 @@ Codex subagents provide conversation-thread isolation, not filesystem
 isolation. They share the parent working directory and may conflict when editing
 the same checkout.
 
+Every linked worktree resolves one canonical project context root from Git's
+common directory plus project configuration. Context pages, graph mutexes,
+receipts, locks, and ledgers are never copied per worktree. Code isolation may be
+per-worktree; context coordination remains one shared source.
+
 Defaults:
 
 - collection and inventory: self-contained prompt, minimal history, read-only
-  sandbox, economy model;
+  sandbox, economy model, and a task capsule rather than hygiene instructions;
 - implementation: bounded relevant history, workspace-write sandbox, balanced
   model;
 - orchestration and final review: enough history for decisions and constraints,
@@ -333,7 +398,7 @@ Defaults:
 The current runner's `fork_turns` control is used when exposed, but it is not a
 portable contract. `none` still retains system, project, hook, and instruction
 context. The adapter discovers available collaboration tools and context controls
-at runtime and otherwise emits self-contained task prompts.
+at runtime and otherwise emits self-contained task capsules.
 
 Subagents inherit the active hook composition and parent sandbox/permission
 overrides. Custom Codex agents may further constrain sandbox, MCP servers,
@@ -399,7 +464,8 @@ All behavior changes use red-green TDD. The smallest useful layers are:
 - adapter tests proving generated Claude and Codex configuration contains no
   cross-platform vocabulary and preserves authored content;
 - lifecycle tests for refresh, global/project Firstmate bootstrap, registry
-  updates, and Git availability reporting;
+  updates, private cross-project routing, task-capsule budgets, receipt hashes,
+  canonical worktree context resolution, and Git availability reporting;
 - fixture tests pinned to the Codex 0.146 hook and model-list schemas;
 - portable, opt-in live Codex probe covering SessionStart, SubagentStart,
   child Pre/PostToolUse, SubagentStop, and generated profile selection;
@@ -417,6 +483,8 @@ sanitized logs, bounded execution, and cleanup checks.
 - Existing malformed hook configuration: fail with path and parse error; keep
   original bytes.
 - Partial managed-block write: write temporary file and atomically replace.
+- Control-plane diagnostic: keep full detail in a file and return only the
+  actionable task-level reason to the model.
 - Missing model catalog: retain profiles and warn.
 - Unsupported model/effort: use the documented role fallback and record the
   actual selection.
@@ -439,6 +507,7 @@ sanitized logs, bounded execution, and cleanup checks.
 - No filesystem isolation without a worktree or separate checkout.
 - No rewrite of the deterministic context-page core.
 - No database, graph service, embeddings, or duplicated per-family lock engine.
+- No routine model training on context-hygiene procedures.
 
 These can be added only after a measured need or a stable native Codex feature
 makes them smaller than the current solution.
@@ -453,6 +522,11 @@ makes them smaller than the current solution.
 - Live Codex child tool calls trigger the expected project hooks.
 - Firstmate operates from the neutral data root and refresh preserves authored
   state.
+- Routine agents receive bounded task capsules and no full hygiene, ledger,
+  registry, or graph dump.
+- Task receipts prove which node versions produced each capsule without adding
+  bookkeeping to model-visible context.
+- Parallel worktrees resolve one canonical shared project context root.
 - Wiki, Decisions, Failures, and Workstreams use the common mutex, ledger,
   reachability, and agent orchestration paths.
 - Each graph router contains every live HEAD and no child nodes; every live node
