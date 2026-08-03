@@ -316,6 +316,24 @@ def main():
     task_class = classify_task(args.lines, args.files)
     staleness = check_staleness(context_root, page)
     lock_status = acquire_lock(context_root, page, args.agent_id, args.intent)
+    if not lock_status.get("acquired"):
+        instruction = f"BLOCKED: {lock_status.get('reason', 'unknown')}. {lock_status.get('action', '')}".strip()
+        if lock_status.get("status") == "blocked_active_lock":
+            print(json.dumps({
+                "status": "blocked_active_lock",
+                "page": page,
+                "action": lock_status.get("action", "orchestrator_resolution_required"),
+                "instruction": instruction,
+            }, indent=2))
+        else:
+            print(json.dumps({
+                "status": lock_status.get("status"),
+                "page": page,
+                "lock_status": lock_status,
+                "instruction": instruction,
+            }, indent=2))
+        return
+
     receipt = record_receipt(context_root, capsule, session=args.session, turn=args.turn)
     diagnostics_file = write_task_diagnostics(context_root, {
         "lock_status": lock_status,
@@ -334,13 +352,10 @@ def main():
         "instruction": "",
     }
 
-    if lock_status.get("acquired"):
-        if staleness.get("stale"):
-            result["instruction"] = f"Lock acquired. WARNING: page may be stale: {staleness.get('reason', staleness.get('status'))}."
-        else:
-            result["instruction"] = "Lock acquired. Proceed with edit."
+    if staleness.get("stale"):
+        result["instruction"] = f"Lock acquired. WARNING: page may be stale: {staleness.get('reason', staleness.get('status'))}."
     else:
-        result["instruction"] = f"BLOCKED: {lock_status.get('reason', 'unknown')}. {lock_status.get('action', '')}"
+        result["instruction"] = "Lock acquired. Proceed with edit."
 
     print(json.dumps(result, indent=2))
 

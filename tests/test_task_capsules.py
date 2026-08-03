@@ -47,6 +47,7 @@ def write_node(
     statement: str,
     *,
     affects: str = "src/cache.py",
+    visibility: str = "agent",
 ) -> Path:
     directory = {
         "wiki": "wiki",
@@ -62,6 +63,7 @@ def write_node(
 <meta name="kind" content="{kind}">
 <meta name="status" content="{status}">
 <meta name="affects" content="{affects}">
+<meta name="visibility" content="{visibility}">
 </head><body><article id="{node_id}" data-statement="{statement}"></article></body></html>''')
     return path
 
@@ -73,7 +75,16 @@ def test_capsule_contains_only_scoped_model_context(tmp_path):
     write_node(root, "fail-cache", "failure", "open", "Cache migration is blocked by old keys.")
     write_node(root, "work-cache", "work", "blocked", "Cache rollout waits for migration.")
     write_node(root, "dec-parser", "decision", "accepted", "Unrelated parser decision", affects="src/parser.py")
-    write_node(root, "wiki-private", "wiki", "active", "mutex receipt_id daily_hygiene", affects="src/cache.py")
+    write_node(
+        root,
+        "wiki-private",
+        "wiki",
+        "active",
+        "mutex receipt_id daily_hygiene",
+        affects="src/cache.py",
+        visibility="private",
+    )
+    write_node(root, "wiki-global", "wiki", "active", "Unrelated global fact.", affects="context-only")
 
     capsule = build_capsule(
         root,
@@ -90,9 +101,24 @@ def test_capsule_contains_only_scoped_model_context(tmp_path):
     assert "Cache migration is blocked by old keys." in capsule.text
     assert "Cache rollout waits for migration." in capsule.text
     assert "Unrelated parser decision" not in capsule.text
+    assert "Unrelated global fact" not in capsule.text
     assert all(term not in capsule.text for term in FORBIDDEN_MODEL_TEXT)
     assert len(capsule.node_ids) == 4
     assert len(capsule.text) <= 4000
+
+
+def test_explicit_task_link_is_positive_relevance(tmp_path):
+    root = make_root(tmp_path)
+    write_node(root, "dec-parser", "decision", "accepted", "Parser decision.", affects="src/parser.py")
+
+    capsule = build_capsule(
+        root,
+        {"task": "Repair cache", "result": "Safe cache", "links": ["decisions/dec-parser.html#dec-parser"]},
+        ["src/cache.py"],
+        "worker",
+    )
+
+    assert "Parser decision." in capsule.text
 
 
 def test_capsule_bounds_and_truncation_are_deterministic(tmp_path):
@@ -112,6 +138,20 @@ def test_capsule_bounds_and_truncation_are_deterministic(tmp_path):
     assert "\nResult: " in first.text
 
 
+@pytest.mark.parametrize("limit", [1, 16, 32, 63])
+def test_positive_small_character_budgets_are_exact_upper_bounds(tmp_path, limit):
+    root = make_root(tmp_path)
+    capsule = build_capsule(root, {"task": "Repair cache", "result": "Safe cache"}, [], "worker", limit)
+    assert 0 < len(capsule.text) <= limit
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_nonpositive_character_budget_is_rejected(tmp_path, limit):
+    root = make_root(tmp_path)
+    with pytest.raises(CapsuleError, match="positive"):
+        build_capsule(root, "Cache", [], "worker", limit)
+
+
 def test_receipt_hashes_exact_bytes_and_restore_rebuilds_changed_node(tmp_path):
     root = make_root(tmp_path)
     path = write_node(root, "dec-cache", "decision", "accepted", "Use tenant cache keys.")
@@ -123,7 +163,8 @@ def test_receipt_hashes_exact_bytes_and_restore_rebuilds_changed_node(tmp_path):
     assert stored["source_hashes"] == {"dec-cache": hashlib.sha256(path.read_bytes()).hexdigest()}
     assert stored["session"] == "session-1"
     assert stored["turn"] == "turn-1"
-    assert stored["budget"] == len(capsule.text)
+    assert stored["budget"] == 4000
+    assert stored["chars"] == len(capsule.text)
     assert stored["time"]
     assert "receipt_id" not in capsule.text
 
@@ -160,6 +201,42 @@ def test_restore_rejects_missing_source_hash(tmp_path):
 
     with pytest.raises(CapsuleError, match="missing source hash for dec-cache"):
         restore_capsule(root, receipt)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("project_id", "forged"),
+        ("node_ids", ["dec-foreign"]),
+        ("paths", ["src/foreign.py"]),
+        ("receipt_id", "0" * 64),
+    ],
+)
+def test_restore_rejects_forged_external_receipt_fields(tmp_path, field, value):
+    root = make_root(tmp_path)
+    write_node(root, "dec-cache", "decision", "accepted", "Use tenant cache keys.")
+    receipt = record_receipt(root, build_capsule(root, "Cache", ["src/cache.py"], "worker"))
+    forged = {**receipt, field: value}
+
+    with pytest.raises(CapsuleError):
+        restore_capsule(root, forged)
+
+
+def test_restore_rejects_tampered_ledger_digest_and_currently_out_of_scope_node(tmp_path):
+    root = make_root(tmp_path)
+    path = write_node(root, "dec-cache", "decision", "accepted", "Use tenant cache keys.")
+    receipt = record_receipt(root, build_capsule(root, "Cache", ["src/cache.py"], "worker"))
+    ledger = root / "ledger-events.ndjson"
+    record = json.loads(ledger.read_text().splitlines()[-1])
+    record["paths"] = ["src/forged.py"]
+    ledger.write_text(json.dumps(record) + "\n")
+    with pytest.raises(CapsuleError, match="digest"):
+        restore_capsule(root, receipt["receipt_id"])
+
+    ledger.write_text(json.dumps(receipt) + "\n")
+    path.write_text(path.read_text().replace('content="src/cache.py"', 'content="src/parser.py"'))
+    with pytest.raises(CapsuleError, match="no longer relevant"):
+        restore_capsule(root, receipt["receipt_id"])
 
 
 def test_rejects_scope_escape_and_node_symlink_escape(tmp_path):
@@ -234,3 +311,35 @@ def test_start_task_returns_capsule_and_spills_diagnostics(tmp_path):
     diagnostics = root / payload["diagnostics_file"]
     assert diagnostics.is_file()
     assert "staleness" in json.loads(diagnostics.read_text())
+
+
+def test_blocked_start_returns_only_actionable_result_without_capsule_or_receipt(tmp_path):
+    root = make_root(tmp_path)
+    page = root / "decisions.html"
+    page.write_text('<html><head><meta name="tracks" content="context-only"></head><body></body></html>')
+    config = json.loads((root / "config.json").read_text())
+    config.update({
+        "defaultRole": "worker",
+        "agentRoles": {"one": "worker", "two": "worker"},
+        "permissionProfiles": {"worker": {"acquire_lock": True}},
+    })
+    (root / "config.json").write_text(json.dumps(config))
+    command = [
+        sys.executable,
+        str(SCRIPTS / "start-task.py"),
+        "--page",
+        "decisions.html",
+        "--intent",
+        "Repair cache",
+    ]
+    subprocess.run(command + ["--agent-id", "one"], cwd=root.parent, capture_output=True, text=True, check=True)
+    receipts_before = [event for event in read_ledger_events(root) if event.get("event") == "task_capsule"]
+    blocked = subprocess.run(
+        command + ["--agent-id", "two"], cwd=root.parent, capture_output=True, text=True, check=True
+    )
+    payload = json.loads(blocked.stdout)
+
+    assert payload["status"] == "blocked_active_lock"
+    assert set(payload) == {"status", "page", "action", "instruction"}
+    assert "BLOCKED:" in payload["instruction"]
+    assert [event for event in read_ledger_events(root) if event.get("event") == "task_capsule"] == receipts_before
