@@ -293,7 +293,7 @@ def test_stop_protocol_privately_captures_one_bounded_candidate(tmp_path, platfo
     (root / "config.json").write_text(json.dumps({"scope": "global", "repoRoots": [{"path": "."}]}))
     (root / "capture-inbox.html").write_text('<html><body><section id="candidates"></section></body></html>')
     private = "TOKEN=supersecret " + "x" * 1000
-    payload = {"session_id": "session-private", "final_message": f"Failure found: {private}"}
+    payload = {"session_id": "session-private", "last_assistant_message": f"Failure found: {private}"}
 
     completed = subprocess.run(
         [
@@ -323,3 +323,65 @@ def test_stop_protocol_privately_captures_one_bounded_candidate(tmp_path, platfo
     assert 'data-kind="failure"' in article.group()
     assert 'data-source="session-private"' in article.group()
     assert (root / "capture-inbox.html").stat().st_mode & 0o777 == 0o600
+
+
+def test_final_message_legacy_fallback_is_stop_only(tmp_path):
+    root = tmp_path / "firstmate" / "context"
+    root.mkdir(parents=True)
+    (root / "index.html").write_text("<html></html>")
+    (root / "config.json").write_text(json.dumps({"scope": "global", "repoRoots": [{"path": "."}]}))
+    inbox = root / "capture-inbox.html"
+    inbox.write_text('<html><body><section id="candidates"></section></body></html>')
+
+    stop = normalize_event("Stop", {
+        "session_id": "legacy-stop",
+        "final_message": "Failure found: retain legacy Stop capture",
+    })
+    assert dispatch(stop, root).context == ""
+    captured = inbox.read_text()
+    assert captured.count('class="candidate"') == 1
+
+    session_end = normalize_event("SessionEnd", {
+        "session_id": "legacy-session-end",
+        "final_message": "Failure found: do not capture legacy SessionEnd",
+    })
+    assert dispatch(session_end, root).context == ""
+    assert inbox.read_text() == captured
+
+
+@pytest.mark.parametrize("transcript_kind", ("outside", "symlink", "escape"))
+def test_sessionend_transcript_only_payload_never_reads_or_captures(
+    tmp_path, monkeypatch, transcript_kind
+):
+    root = tmp_path / "firstmate" / "context"
+    root.mkdir(parents=True)
+    (root / "index.html").write_text("<html></html>")
+    (root / "config.json").write_text(json.dumps({"scope": "global", "repoRoots": [{"path": "."}]}))
+    inbox = root / "capture-inbox.html"
+    inbox.write_text('<html><body><section id="candidates"></section></body></html>')
+    outside = tmp_path / "outside-transcript.jsonl"
+    outside.write_bytes(b"DO-NOT-READ\n" * 200_000)
+    link = root / "transcript-link"
+    link.symlink_to(outside)
+    transcript = {
+        "outside": outside,
+        "symlink": link,
+        "escape": Path("../../outside-transcript.jsonl"),
+    }[transcript_kind]
+    original_read_text = Path.read_text
+
+    def reject_transcript_read(path, *args, **kwargs):
+        if path.resolve() == outside.resolve():
+            raise AssertionError("SessionEnd read untrusted transcript_path")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_transcript_read)
+    event = normalize_event("SessionEnd", {
+        "session_id": "session-transcript-only",
+        "reason": "clear",
+        "transcript_path": str(transcript),
+    })
+
+    assert dispatch(event, root).context == ""
+    assert 'class="candidate"' not in inbox.read_text()
+    assert outside.stat().st_size > 1_000_000

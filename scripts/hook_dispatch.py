@@ -57,6 +57,7 @@ class Event:
     permission_mode: str
     model: str
     prompt: str
+    last_assistant_message: str
     final_message: str
     role: str
     task: str
@@ -231,6 +232,7 @@ def normalize_event(event_name, payload) -> Event:
         permission_mode=str(data.get("permission_mode") or data.get("permissionMode") or ""),
         model=str(data.get("model") or ""),
         prompt=str(data.get("prompt") or data.get("user_prompt") or ""),
+        last_assistant_message=_clean(data.get("last_assistant_message"), 4000),
         final_message=_clean(data.get("final_message"), 4000),
         role=_clean(data.get("agent_type") or data.get("role") or tool_input.get("agent_type") or tool_input.get("role")),
         task=_clean(data.get("task") or data.get("task_name") or tool_input.get("task_name") or tool_input.get("message")),
@@ -484,18 +486,25 @@ def dispatch(event: Event, context_root) -> Result:
         failure = _validation_failure(root)
         return Result(context=failure, continue_=bool(failure))
     if event.name in {"Stop", "SessionEnd"}:
-        if event.final_message:
+        # Stop owns candidate capture. SessionEnd never opens transcript_path and
+        # only accepts an explicit documented last_assistant_message.
+        message = (
+            event.last_assistant_message or event.final_message
+            if event.name == "Stop"
+            else event.last_assistant_message
+        )
+        if message:
             try:
                 target = canonical_context_root(event.cwd or root.parent)
-                if re.search(r"\b(fail(?:ure|ed)?|error|blocked)\b", event.final_message, re.I):
+                if re.search(r"\b(fail(?:ure|ed)?|error|blocked)\b", message, re.I):
                     kind = "failure"
-                elif re.search(r"\b(question|unknown|unclear)\b", event.final_message, re.I):
+                elif re.search(r"\b(question|unknown|unclear)\b", message, re.I):
                     kind = "open-question"
                 else:
                     kind = "decision"
                 append_capture_candidate(
                     target,
-                    _clean(event.final_message, 500),
+                    _clean(message, 500),
                     kind,
                     _clean(event.session_id, 120),
                 )

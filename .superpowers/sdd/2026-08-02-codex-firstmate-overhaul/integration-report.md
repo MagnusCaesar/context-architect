@@ -79,3 +79,31 @@
 - Python compile: `28` scripts, exit `0`.
 - Bash syntax: `6` files, `0` failures.
 - `git diff --check`: exit `0`.
+
+## Fix round 2
+
+- Claude Stop and Codex SessionEnd normalize the documented
+  `last_assistant_message` field. Stop alone retains `final_message` as a
+  backward-compatible fallback.
+- SessionEnd never opens `transcript_path`; reason/transcript-only payloads
+  cannot append candidates. An explicit documented last assistant message can
+  append through the existing bounded, redacted, mutex-protected `0600` inbox
+  path.
+- Adversarial outside, symlink, traversal-shaped, and multi-megabyte transcript
+  sentinels prove zero transcript reads and zero candidates.
+
+### Fix-round 2 TDD evidence
+
+- Documented Stop/SessionEnd capture RED `2/2`, then GREEN `2/2`.
+- Transcript-only adversaries remained safe `3/3`; combined targeted suite
+  GREEN `30/30`.
+- Legacy `final_message` is characterized as a Stop-only fallback `1/1`.
+
+### Fix-round 2 verification
+
+- Focused hook/lifecycle suite: `84 passed`.
+- Full Python suite: `214 passed`.
+- Smoke: `101 passed, 0 failed`.
+- Python compile: `28` scripts, exit `0`.
+- Bash syntax: `6` files, `0` failures.
+- `git diff --check`: exit `0`.
