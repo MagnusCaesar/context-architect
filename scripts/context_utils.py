@@ -27,7 +27,7 @@ def firstmate_root(env: dict | None = None) -> Path:
     if env.get("CONTEXT_ARCH_FIRSTMATE"):
         return Path(env["CONTEXT_ARCH_FIRSTMATE"]).expanduser()
     if env.get("FIRSTMATE_HOME"):
-        warnings.warn("FIRSTMATE_HOME is deprecated; use CONTEXT_ARCH_FIRSTMATE", DeprecationWarning)
+        warnings.warn("FIRSTMATE_HOME is deprecated; use CONTEXT_ARCH_FIRSTMATE", FutureWarning, stacklevel=2)
         return Path(env["FIRSTMATE_HOME"]).expanduser()
     base = Path(env.get("XDG_DATA_HOME") or (Path(env.get("HOME", str(Path.home()))) / ".local" / "share"))
     return base / "context-architecture" / "firstmate"
@@ -36,12 +36,32 @@ def firstmate_root(env: dict | None = None) -> Path:
 def migrate_firstmate(source: Path, target: Path) -> Path:
     """Copy legacy Firstmate state; never delete or mutate the source."""
     source, target = Path(source).resolve(), Path(target).resolve()
+    if source == target or target.is_relative_to(source) or source.is_relative_to(target):
+        raise ValueError(f"Firstmate migration roots overlap: {source} and {target}")
     if not source.is_dir():
         raise FileNotFoundError(source)
     if target.exists() and any(target.iterdir()):
         raise FileExistsError(f"migration target is not empty: {target}")
     shutil.copytree(source, target, dirs_exist_ok=True)
     return target
+
+
+def registered_projects(context_root: Path, registry: Path | None = None) -> tuple[tuple[str, str, str, str], ...]:
+    """Read bounded Firstmate registry rows without opening registered projects."""
+    registry = registry or Path(context_root) / "project-registry.html"
+    try:
+        if registry.stat().st_size > 1_048_576:
+            return ()
+        content = registry.read_text(errors="replace")
+    except OSError:
+        return ()
+    projects = []
+    for match in list(re.finditer(r'<article[^>]*class="project"[^>]*>(.*?)</article>', content, re.S))[:256]:
+        text = html.unescape(re.sub(r"<[^>]*>", "", match.group(1)))
+        parts = [re.sub(r"\s+", " ", part).strip() for part in text.split("|", 3)]
+        if len(parts) == 4 and parts[0] and parts[1]:
+            projects.append((parts[0][:80], parts[1][:500], parts[2][:240], parts[3][:40]))
+    return tuple(projects)
 
 
 class MutexTimeout(Exception):

@@ -23,10 +23,28 @@ import hook_dispatch  # noqa: E402
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
+HOOK_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "hook_dispatch.py"
 
 
 def fixture(name):
     return json.loads((FIXTURES / name).read_text())
+
+
+def firstmate_context(tmp_path):
+    context = tmp_path / "firstmate" / "context"; context.mkdir(parents=True)
+    (context / "config.json").write_text(json.dumps({"scope": "global"}))
+    alpha = tmp_path / "alpha" / "context"; beta = tmp_path / "beta" / "context"
+    alpha.mkdir(parents=True); beta.mkdir(parents=True)
+    (alpha / "index.html").write_text("ALPHA_NODE_SECRET")
+    (beta / "index.html").write_text("BETA_CAPTURE_SECRET")
+    (context / "project-registry.html").write_text(
+        '<section id="projects">'
+        f'<article class="project">alpha | {alpha} | Alpha | active</article>'
+        f'<article class="project">beta | {beta} | Beta | blocked</article>'
+        '</section>'
+    )
+    (context / ".validation-state.json").write_text(json.dumps({"status": "warning"}))
+    return context, alpha, beta
 
 
 def test_claude_edit_normalizes_ids_metadata_and_space_path():
@@ -123,6 +141,41 @@ def test_subagent_start_redacts_secrets_before_bounded_injection(tmp_path):
 def test_subagent_start_without_role_task_or_scope_injects_nothing(tmp_path):
     event = normalize_event("SubagentStart", {"agent_id": ""})
     assert dispatch(event, tmp_path).context == ""
+
+
+def test_firstmate_session_hook_injects_only_bounded_registry_status(tmp_path):
+    context, alpha, beta = firstmate_context(tmp_path)
+    output = dispatch(normalize_event("SessionStart", {}), context).context
+    assert len(output) <= 800
+    assert all(value in output for value in ("Firstmate", "registered=2", "validation=warning"))
+    assert all(value not in output for value in (str(alpha), str(beta), "ALPHA_NODE_SECRET", "BETA_CAPTURE_SECRET"))
+
+
+def test_firstmate_prompt_hook_routes_exactly_one_relevant_project_via_cli(tmp_path):
+    context, alpha, beta = firstmate_context(tmp_path)
+    completed = subprocess.run(
+        [sys.executable, str(HOOK_SCRIPT), "--platform", "codex", "--event", "UserPromptSubmit",
+         "--context-root", str(context)],
+        input=json.dumps({"prompt": "continue alpha implementation"}), capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    injected = json.loads(completed.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert all(value in injected for value in ("project=alpha", f"root={alpha}", "status=active"))
+    assert all(value not in injected for value in (str(beta), "ALPHA_NODE_SECRET", "BETA_CAPTURE_SECRET"))
+    ambiguous = dispatch(normalize_event("UserPromptSubmit", {"prompt": "compare alpha and beta"}), context).context
+    assert str(alpha) not in ambiguous and str(beta) not in ambiguous
+
+
+def test_firstmate_subagent_hook_combines_capsule_with_only_relevant_status(tmp_path):
+    context, alpha, beta = firstmate_context(tmp_path)
+    event = normalize_event("SubagentStart", {
+        "agent_id": "child", "agent_type": "worker", "task": "audit beta failures",
+        "scope": ["src/beta.py"],
+    })
+    injected = dispatch(event, context).context
+    assert all(value in injected for value in ("task=audit beta failures", "project=beta", f"root={beta}", "status=blocked"))
+    assert all(value not in injected for value in (str(alpha), "ALPHA_NODE_SECRET", "BETA_CAPTURE_SECRET"))
+    assert len(injected) <= 800
 
 
 def test_subagent_payload_does_not_stringify_sensitive_nested_containers(tmp_path):

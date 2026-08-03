@@ -1,24 +1,15 @@
 #!/usr/bin/env python3
 """fm-review.py — walk the first-mate registry and run each project's existing
 hygiene/reachability/validate scripts. Read-only; never mutates project state."""
-import argparse, html, json, re, subprocess, sys
+import argparse, json, subprocess, sys
 from pathlib import Path
 
-from context_utils import firstmate_root
+from context_utils import firstmate_root, registered_projects
 
 def parse_registry(reg: Path):
     """Yield (name, context_path) from <article class="project">name | path | ...</article>."""
-    if not reg.exists():
-        return
-    content = reg.read_text(errors="replace")
-    for m in re.finditer(r'<article[^>]*class="project"[^>]*>(.*?)</article>', content, re.S):
-        text = html.unescape(re.sub(r"<[^>]*>", "", m.group(1)))
-        text = re.sub(r"\s+", " ", text).strip()
-        if not text:
-            continue
-        parts = [p.strip() for p in text.split("|")]
-        if len(parts) >= 2:
-            yield parts[0], parts[1]
+    for name, path, _summary, _status in registered_projects(reg.parent, reg):
+        yield name, path
 
 def run_json(script: Path, ctx: Path, extra=("--json",)):
     """Run a context script from inside ctx, return parsed JSON or an error dict."""

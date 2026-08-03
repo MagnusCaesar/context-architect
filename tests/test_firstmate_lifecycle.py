@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ def test_neutral_root_precedence_and_legacy_warning(tmp_path):
     env = {"HOME": str(tmp_path / "home"), "XDG_DATA_HOME": str(tmp_path / "xdg")}
     assert firstmate_root(env) == tmp_path / "xdg" / "context-architecture" / "firstmate"
     env["FIRSTMATE_HOME"] = str(tmp_path / "legacy")
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         assert firstmate_root(env) == tmp_path / "legacy"
     env["CONTEXT_ARCH_FIRSTMATE"] = str(tmp_path / "preferred")
     assert firstmate_root(env) == tmp_path / "preferred"
@@ -37,6 +38,32 @@ def test_explicit_migration_copies_without_deleting_source(tmp_path):
     migrate_firstmate(source, target)
     assert (source / "context" / "project-registry.html").read_text() == "registry"
     assert (target / "context" / "project-registry.html").read_text() == "registry"
+
+
+@pytest.mark.parametrize("layout", ["same", "target-inside-source", "source-inside-target"])
+def test_migration_rejects_overlapping_roots_without_mutating_source(tmp_path, layout):
+    source = tmp_path / "source"; source.mkdir(); marker = source / "keep"; marker.write_text("source")
+    if layout == "same":
+        target = source
+    elif layout == "target-inside-source":
+        target = source / "nested"
+    else:
+        target = tmp_path; source = tmp_path / "source"
+    with pytest.raises(ValueError, match="overlap"):
+        migrate_firstmate(source, target)
+    assert marker.read_text() == "source"
+
+
+def test_legacy_alias_warning_is_visible_from_cli(tmp_path):
+    legacy = tmp_path / "legacy"; legacy.mkdir()
+    env = dict(os.environ); env["FIRSTMATE_HOME"] = str(legacy)
+    env.pop("CONTEXT_ARCH_FIRSTMATE", None)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "bootstrap.py"), "--scope", "global",
+         "--platform", "codex", "--scan"], capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0
+    assert "FIRSTMATE_HOME is deprecated" in result.stderr
 
 
 @pytest.mark.parametrize("init_git", [False, True])
@@ -106,6 +133,12 @@ def test_codex_profiles_are_concise_and_truthful(tmp_path):
         assert all(word not in text.lower() for word in ("mutex", "ledger format", "receipt format", "graph schema", "hygiene algorithm"))
         assert "task capsule" in text.lower()
         assert "shared filesystem" in text.lower()
+        assert "hook composition" in text.lower()
+        assert "parent safety overrides" in text.lower()
+    economy = tomllib.loads((profiles / "economy.toml").read_text())
+    assert economy["model"] == "gpt-5.6-terra"
+    assert economy["model_reasoning_effort"] == "low"
+    assert "Desired gpt-5.6-luna/medium; actual gpt-5.6-terra/low" in economy["developer_instructions"]
 
 
 def test_claude_refresh_never_adds_codex_model_policy(tmp_path):
@@ -127,6 +160,10 @@ def test_malformed_catalog_refresh_preserves_generated_profiles(tmp_path):
     assert generated.returncode == 0, generated.stderr + generated.stdout
     profiles = target / ".codex" / "agents"
     before = {path.name: path.read_bytes() for path in profiles.glob("*.toml")}
+    config_path = target / "context" / "config.json"
+    config = json.loads(config_path.read_text()); config.pop("modelPolicy")
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+    config_before = config_path.read_bytes()
     fake_bin = tmp_path / "bin"; fake_bin.mkdir()
     fake = fake_bin / "codex"; fake.write_text("#!/bin/sh\nprintf '{broken\\n'\n"); fake.chmod(0o755)
     env = dict(os.environ); env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
@@ -134,4 +171,5 @@ def test_malformed_catalog_refresh_preserves_generated_profiles(tmp_path):
                                capture_output=True, text=True, env=env)
     assert refreshed.returncode == 0, refreshed.stderr + refreshed.stdout
     assert {path.name: path.read_bytes() for path in profiles.glob("*.toml")} == before
+    assert config_path.read_bytes() == config_before
     assert "model policy preserved" in refreshed.stdout.lower()

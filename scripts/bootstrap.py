@@ -32,9 +32,10 @@ from pathlib import Path
 from context_utils import (context_mutex, firstmate_root, migrate_firstmate,
                            resolve_context_page, today_utc, write_atomic)
 from hook_dispatch import LEGACY_HOOK_NAMES, merge_hook_config
-from model_policy import (CatalogError, DEFAULT_POLICY, PolicyConflict,
+from model_policy import (DIRECT_REJECTED_MODELS, CatalogError, DEFAULT_POLICY,
+                          PolicyConflict, bundle_digests, direct_surface_roles,
                           fetch_catalog, refresh_policy, resolve_roles,
-                          write_profiles)
+                          write_policy_bundle)
 from platforms import (PlatformError, install_bootloaders, managed_hook_config,
                        platform_choice, platform_homes, preflight_bootloaders,
                        resolve_platform)
@@ -398,14 +399,11 @@ SELF_HEALING_CONFIG_DEFAULTS = {
 }
 
 
-def configured_roles(policy: dict) -> dict[str, tuple[str, str]]:
-    return {role: (policy[role]["model"], policy[role]["effort"])
-            for role in ("lead", "balanced", "economy")}
-
-
-def install_default_profiles(target: Path, config: dict) -> list[str]:
+def install_default_profiles(target: Path, context_dir: Path, config: dict) -> list[str]:
     policy = config.setdefault("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
-    return [str(path.relative_to(target)) for path in write_profiles(target, configured_roles(policy), policy)]
+    paths = write_policy_bundle(target, context_dir / "config.json", config,
+                                direct_surface_roles(policy), policy)
+    return [str(path.relative_to(target)) for path in paths if path != context_dir / "config.json"]
 
 
 def refresh_codex_profiles(target: Path, context_dir: Path) -> dict:
@@ -416,17 +414,16 @@ def refresh_codex_profiles(target: Path, context_dir: Path) -> dict:
     except CatalogError as exc:
         return {"status": "preserved", "changes": [], "notices": [str(exc)]}
     with context_mutex(context_dir, "model-policy"):
+        expected = bundle_digests(target, config_path)
         config = json.loads(config_path.read_text(errors="replace"))
         current = config.get("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
         updated, changes, notices = refresh_policy(current, catalog, refresh=True)
         try:
-            roles = resolve_roles(catalog, updated)
-            write_profiles(target, roles, updated)
-        except (CatalogError, PolicyConflict) as exc:
-            return {"status": "preserved", "changes": [], "notices": notices + [str(exc)]}
-        if updated != current:
+            roles = resolve_roles(catalog, updated, rejected_models=set(DIRECT_REJECTED_MODELS))
             config["modelPolicy"] = updated
-            write_atomic(config_path, json.dumps(config, indent=2) + "\n", context_root=context_dir)
+            write_policy_bundle(target, config_path, config, roles, updated, expected=expected)
+        except (CatalogError, OSError, PolicyConflict, ValueError) as exc:
+            return {"status": "preserved", "changes": [], "notices": notices + [str(exc)]}
         return {"status": "updated" if changes else "verified", "changes": changes, "notices": notices}
 
 
@@ -538,9 +535,6 @@ def refresh_context(target: Path, platforms) -> dict:
             if k not in cfg:
                 cfg[k] = v
                 config_added.append(k)
-        if "codex" in platforms and "modelPolicy" not in cfg:
-            cfg["modelPolicy"] = json.loads(json.dumps(DEFAULT_POLICY))
-            config_added.append("modelPolicy")
         if config_added:
             write_atomic(config_path, json.dumps(cfg, indent=2) + "\n", context_root=context_dir)
             updated.append(f"config.json (+{','.join(config_added)})")
@@ -738,9 +732,9 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
             config_data.setdefault(key, permission_defaults[key])
     if "codex" in platforms:
         config_data.setdefault("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
-    write_atomic(context_dir / "config.json", json.dumps(config_data, indent=2) + "\n", context_root=context_dir)
-    if "codex" in platforms:
-        install_default_profiles(target, config_data)
+        install_default_profiles(target, context_dir, config_data)
+    else:
+        write_atomic(context_dir / "config.json", json.dumps(config_data, indent=2) + "\n", context_root=context_dir)
 
     # Generate index.html
     today = today_utc()

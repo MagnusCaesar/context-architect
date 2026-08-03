@@ -5,13 +5,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import selectors
 import subprocess
+import tempfile
 import time
+import tomllib
 import warnings
 from pathlib import Path
-
-from context_utils import write_atomic
 
 POLICY_REVISION = "2026-08-02.1"
 DEFAULT_POLICY = {
@@ -21,6 +22,8 @@ DEFAULT_POLICY = {
     "economy": {"model": "gpt-5.6-luna", "effort": "medium"},
 }
 ROLES = ("lead", "balanced", "economy")
+DIRECT_REJECTED_MODELS = frozenset({"gpt-5.6-luna"})
+DIRECT_SUPPORTED_MODELS = frozenset({"gpt-5.6-sol", "gpt-5.6-terra"})
 REQUIRED_FIELDS = ("id", "model", "displayName", "hidden", "isDefault",
                    "defaultReasoningEffort", "supportedReasoningEfforts")
 TEMPLATES = Path(__file__).resolve().parent.parent / "templates" / "agents"
@@ -72,6 +75,8 @@ def validate_catalog(items: list[dict]) -> dict[str, dict]:
         if item["id"] != item["model"]:
             raise CatalogError(f"model id mismatch: {item['id']} != {item['model']}")
         _efforts(item)
+        _upgrade_target(item.get("upgrade"), "upgrade")
+        _upgrade_target(item.get("upgradeInfo"), "upgradeInfo")
         ids.add(item["id"]); catalog[item["model"]] = item
     return catalog
 
@@ -103,15 +108,16 @@ def resolve_roles(items: list[dict], policy: dict | None = None,
     return resolved
 
 
-def _upgrade_target(value) -> str | None:
+def _upgrade_target(value, field: str) -> str | None:
     if value is None:
         return None
-    if isinstance(value, str):
-        return value or None
+    if field == "upgrade" and isinstance(value, str) and value:
+        return value
     if isinstance(value, dict):
-        value = value.get("model")
-        return value if isinstance(value, str) and value else None
-    return None
+        model = value.get("model")
+        if isinstance(model, str) and model:
+            return model
+    raise CatalogError(f"{field} metadata is malformed")
 
 
 def refresh_policy(current: dict, items: list[dict], refresh: bool) -> tuple[dict, list[str], list[str]]:
@@ -124,7 +130,8 @@ def refresh_policy(current: dict, items: list[dict], refresh: bool) -> tuple[dic
         source = catalog.get(configured.get("model"))
         if not source:
             notices.append(f"{role}: configured model unavailable; preserved"); continue
-        direct, info = _upgrade_target(source.get("upgrade")), _upgrade_target(source.get("upgradeInfo"))
+        direct = _upgrade_target(source.get("upgrade"), "upgrade")
+        info = _upgrade_target(source.get("upgradeInfo"), "upgradeInfo")
         if direct and info and direct != info:
             notices.append(f"{role}: conflicting upgrade targets; preserved"); continue
         target_slug = direct or info
@@ -158,6 +165,8 @@ def _rpc_line(proc: subprocess.Popen, selector, request: dict, deadline: float) 
             response = json.loads(line)
         except json.JSONDecodeError as exc:
             raise CatalogError("codex app-server returned malformed JSON-RPC") from exc
+        if not isinstance(response, dict):
+            raise CatalogError("codex app-server JSON-RPC response must be an object")
         if response.get("id") != wanted:
             continue
         if response.get("error"):
@@ -210,10 +219,10 @@ def render_profiles(roles: dict[str, tuple[str, str]], requested: dict | None = 
     requested, rendered = requested or DEFAULT_POLICY, {}
     for role in ROLES:
         slug, effort = roles[role]; wanted = requested[role]
-        actual = f"actual {slug}/{effort}"
-        fallback = "" if (slug, effort) == (wanted["model"], wanted["effort"]) else f"Requested {wanted['model']}/{wanted['effort']} unavailable; {actual}. "
+        desired = f"{wanted['model']}/{wanted['effort']}"
+        actual = f"{slug}/{effort}"
         rendered[f"{role}.toml"] = (TEMPLATES / f"{role}.toml").read_text().format(
-            model=slug, effort=effort, actual=actual, fallback=fallback)
+            model=slug, effort=effort, desired=desired, actual=actual)
     return rendered
 
 
@@ -221,15 +230,91 @@ def _digest(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+def direct_surface_roles(policy: dict | None = None) -> dict[str, tuple[str, str]]:
+    """Conservative defaults for the currently verified direct-subagent surface."""
+    policy = policy or DEFAULT_POLICY
+    roles = {role: (policy[role]["model"], policy[role]["effort"]) for role in ROLES}
+    fallbacks = {"lead": ("gpt-5.6-sol", "high"), "balanced": ("gpt-5.6-terra", "medium"),
+                 "economy": ("gpt-5.6-terra", "low")}
+    for role in ROLES:
+        if roles[role][0] not in DIRECT_SUPPORTED_MODELS:
+            roles[role] = fallbacks[role]
+    return roles
+
+
+def _bundle_paths(target: Path, config_path: Path | None = None) -> list[Path]:
+    agents = target / ".codex" / "agents"
+    paths = [agents / f"{role}.toml" for role in ROLES]
+    return paths + ([Path(config_path)] if config_path else [])
+
+
+def bundle_digests(target: Path, config_path: Path) -> dict[str, str | None]:
+    return {str(path.resolve()): _digest(path) for path in _bundle_paths(target, config_path)}
+
+
+def _stage(path: Path, content: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        handle.write(content); handle.flush(); os.fsync(handle.fileno())
+        return Path(handle.name)
+
+
+def _validate_bundle(contents: dict[Path, bytes]) -> None:
+    for path, content in contents.items():
+        try:
+            parsed = json.loads(content) if path.name == "config.json" else tomllib.loads(content.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ValueError(f"invalid staged {path.name}: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(f"invalid staged {path.name}: expected object")
+        if path.suffix == ".toml" and not all(key in parsed for key in ("name", "model", "model_reasoning_effort", "sandbox_mode", "developer_instructions")):
+            raise ValueError(f"invalid staged {path.name}: missing agent fields")
+
+
+def _replace_bundle(contents: dict[Path, bytes], expected=None, replace=os.replace) -> list[Path]:
+    """Stage, validate, compare-and-swap, and roll back one generated bundle."""
+    _validate_bundle(contents)
+    originals = {path: path.read_bytes() if path.exists() else None for path in contents}
+    baseline = {str(path.resolve()): _digest(path) for path in contents}
+    if expected is not None and any(baseline[key] != expected.get(key) for key in baseline):
+        raise PolicyConflict("model policy bundle changed concurrently")
+    staged = {path: _stage(path, content) for path, content in contents.items()}
+    replaced = []
+    try:
+        if any(_digest(path) != baseline[str(path.resolve())] for path in contents):
+            raise PolicyConflict("model policy bundle changed during staging")
+        for path, temporary in staged.items():
+            replace(temporary, path); replaced.append(path)
+        return list(contents)
+    except Exception:
+        for path in reversed(replaced):
+            original = originals[path]
+            if original is None:
+                path.unlink(missing_ok=True)
+            else:
+                os.replace(_stage(path, original), path)
+        raise
+    finally:
+        for temporary in staged.values():
+            temporary.unlink(missing_ok=True)
+
+
 def write_profiles(target: Path, roles: dict[str, tuple[str, str]], requested: dict | None = None,
                    expected: dict[str, str | None] | None = None) -> list[Path]:
-    destination = target / ".codex" / "agents"; destination.mkdir(parents=True, exist_ok=True)
     rendered = render_profiles(roles, requested=requested)
-    paths = {name: destination / name for name in rendered}
+    paths = _bundle_paths(target)
+    contents = {path: rendered[path.name].encode() for path in paths}
+    normalized = None
     if expected is not None:
-        conflicts = [name for name, path in paths.items() if _digest(path) != expected.get(name)]
-        if conflicts:
-            raise PolicyConflict(f"agent profiles changed concurrently: {', '.join(sorted(conflicts))}")
-    for name, content in rendered.items():
-        write_atomic(paths[name], content)
-    return list(paths.values())
+        normalized = {str(path.resolve()): expected.get(str(path.resolve()), expected.get(path.name)) for path in paths}
+    return _replace_bundle(contents, expected=normalized)
+
+
+def write_policy_bundle(target: Path, config_path: Path, config: dict,
+                        roles: dict[str, tuple[str, str]], requested: dict | None = None,
+                        expected=None, replace=os.replace) -> list[Path]:
+    rendered = render_profiles(roles, requested=requested)
+    paths = _bundle_paths(target, config_path)
+    contents = {path: (json.dumps(config, indent=2) + "\n").encode() if path == config_path
+                else rendered[path.name].encode() for path in paths}
+    return _replace_bundle(contents, expected=expected, replace=replace)

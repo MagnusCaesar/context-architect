@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from context_utils import read_config, read_meta, tracks_status
+from context_utils import read_config, read_meta, registered_projects, tracks_status
 
 
 MANAGED_GROUP = "context-architecture"
@@ -226,6 +226,37 @@ def _capsule(event: Event) -> str:
     return f"Child context: {content}" if content else ""
 
 
+def _firstmate_state(context_root: Path):
+    if read_config(context_root).get("scope") != "global":
+        return None
+    status = "unknown"
+    state = context_root / ".validation-state.json"
+    try:
+        if state.stat().st_size <= 16_384:
+            data = json.loads(state.read_text())
+            if isinstance(data, dict):
+                status = _clean(data.get("status"), 40) or status
+    except (OSError, json.JSONDecodeError):
+        pass
+    return registered_projects(context_root), status
+
+
+def _firstmate_route(context_root: Path, text: str) -> str:
+    state = _firstmate_state(context_root)
+    if not state or not text:
+        return ""
+    projects, _ = state
+    matched = []
+    for name, path, _summary, status in projects:
+        named = re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.I)
+        if named or path in text:
+            matched.append((name, path, status))
+    if len(matched) != 1:
+        return ""
+    name, path, status = matched[0]
+    return f"Firstmate route: project={_clean(name, 80)}; root={_clean(path, 500)}; status={_clean(status, 40) or 'unknown'}"
+
+
 def _record_receipt(event: Event, context_root: Path) -> None:
     path = _receipt_path(context_root, event.session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -356,11 +387,18 @@ def dispatch(event: Event, context_root) -> Result:
     if event.name == "PreToolUse":
         return _edit_gate(event, root)
     if event.name == "SessionStart":
+        firstmate = _firstmate_state(root)
+        if firstmate:
+            projects, status = firstmate
+            summary = f"Firstmate root={_clean(str(root.parent), 500)}; registered={len(projects)}; validation={status}."
+            return Result(context=_bounded(summary, root, event.name))
         return Result(context=_bounded("Read context/index.html before changing tracked work.", root, event.name))
     if event.name == "UserPromptSubmit":
+        route = _firstmate_route(root, event.prompt)
         if re.search(r"\b(decision|failure|open question)\b", event.prompt, re.I):
-            return Result(context="Capture durable decisions, failures, or open questions in context/capture-inbox.html.")
-        return Result()
+            capture = "Capture durable decisions, failures, or open questions in context/capture-inbox.html."
+            return Result(context=_bounded("; ".join(part for part in (route, capture) if part), root, event.name))
+        return Result(context=_bounded(route, root, event.name) if route else "")
     if event.name == "PreCompact":
         _record_receipt(event, root)
         return Result(context="Context receipt recorded; restore only the current task capsule.")
@@ -374,7 +412,9 @@ def dispatch(event: Event, context_root) -> Result:
             return Result(context=_validation_failure(root))
         return Result(context=_freshness_update(root) if event.paths else "")
     if event.name == "SubagentStart":
-        return Result(context=_bounded(_capsule(event), root, event.name))
+        route = _firstmate_route(root, " ".join((event.task, *event.scope)))
+        context = "; ".join(part for part in (_capsule(event), route) if part)
+        return Result(context=_bounded(context, root, event.name))
     if event.name == "SubagentStop":
         failure = _validation_failure(root)
         return Result(context=failure, continue_=bool(failure))
