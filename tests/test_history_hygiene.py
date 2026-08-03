@@ -44,11 +44,20 @@ def write_node(root, relative, content):
     return path
 
 
-def graph_node(node_id, *, affects=(), topic="", source_owner="", statement="shared cache words"):
+def graph_node(
+    node_id,
+    *,
+    kind="decision",
+    status="accepted",
+    affects=(),
+    topic="",
+    source_owner="",
+    statement="shared cache words",
+):
     return Node(
         node_id=node_id,
-        kind="decision",
-        status="accepted",
+        kind=kind,
+        status=status,
         path=Path("decisions") / f"{node_id}.html",
         archived=False,
         archived_at="",
@@ -105,6 +114,36 @@ def test_malformed_archived_at_has_one_path_specific_error(tmp_path):
     ]
 
 
+def test_v2_terminal_archive_requires_archived_at(tmp_path):
+    root = tmp_path / "context"
+    path = write_node(
+        root,
+        "decisions/archived/dec-missing.html",
+        node_html("dec-missing", "decision", "rejected", ""),
+    )
+
+    assert validate_graphs(root, load_nodes(root)) == [
+        f"{path.relative_to(root).as_posix()}: missing archived-at timestamp"
+    ]
+
+
+def test_legacy_terminal_archive_also_requires_literal_timestamp(tmp_path):
+    root = tmp_path / "context"
+    path = write_node(
+        root,
+        "decisions/archived/legacy.html",
+        '<html><body><article class="decision" data-id="dec-legacy" data-status="rejected">legacy</article></body></html>',
+    )
+
+    nodes = load_nodes(root)
+
+    assert [node.node_id for node in nodes] == ["dec-legacy"]
+    assert validate_graphs(root, nodes) == [
+        f"{path.relative_to(root).as_posix()}: missing archived-at timestamp"
+    ]
+    assert render_history(nodes) == ""
+
+
 def test_history_sorts_offset_timestamps_by_instant_then_id(tmp_path):
     root = tmp_path / "wiki" / "context"
     write_node(
@@ -159,6 +198,20 @@ def test_case_different_paths_and_shared_words_do_not_merge():
     assert consolidation_candidates(titles_only) == ()
 
 
+def test_invalid_kind_and_status_never_form_or_extend_candidates():
+    valid = heads_with_affects("src/cache.py", 3)
+    invalid = [
+        *(graph_node(f"unknown-{index}", kind="unknown", affects=("src/cache.py",)) for index in range(3)),
+        graph_node("dec-invalid-status", status="hallucinated", affects=("src/cache.py",)),
+    ]
+
+    assert consolidation_candidates(invalid) == ()
+    assert consolidation_candidates(valid + invalid) == ({
+        "basis": "affects:src/cache.py",
+        "node_ids": ("dec-001-a", "dec-002-b", "dec-003-c"),
+    },)
+
+
 def test_hygiene_never_rewrites_authored_nodes_and_records_candidates(tmp_path):
     root = tmp_path / "context"
     write_node(root, "index.html", '<html><body><a href="decisions.html">decisions</a></body></html>')
@@ -168,6 +221,17 @@ def test_hygiene_never_rewrites_authored_nodes_and_records_candidates(tmp_path):
         relative = f"decisions/{node_id}.html"
         write_node(root, relative, node_html(node_id, "decision", "accepted", "", affects="src/cache.py"))
         links.append(f'<a href="{relative}#{node_id}">{node_id}</a>')
+    for index in range(3):
+        write_node(
+            root,
+            f"decisions/unknown-{index}.html",
+            node_html(f"unknown-{index}", "unknown", "active", "", affects="src/cache.py"),
+        )
+    write_node(
+        root,
+        "decisions/dec-invalid-status.html",
+        node_html("dec-invalid-status", "decision", "hallucinated", "", affects="src/cache.py"),
+    )
     write_node(root, "decisions.html", f'<html><body><section id="graph">{"".join(links)}</section></body></html>')
     write_node(root, "history.html", '<html><body><section id="history"><h2>History</h2><ul></ul></section></body></html>')
     write_node(root, "ledger.html", '<html><body><section id="events"><table><tbody>\n</tbody></table></section></body></html>')
@@ -184,7 +248,14 @@ def test_hygiene_never_rewrites_authored_nodes_and_records_candidates(tmp_path):
     event = json.loads((root / "ledger-events.ndjson").read_text().splitlines()[-1])
     assert event["extra_attrs"]["consolidation_count"] == "1"
     assert event["extra_attrs"]["consolidation_node_ids"] == "dec-001-a,dec-002-b,dec-003-c"
-    assert len(event["extra_attrs"]["consolidation_signature"]) == 64
+    expected_candidates = ({
+        "basis": "affects:src/cache.py",
+        "node_ids": ("dec-001-a", "dec-002-b", "dec-003-c"),
+    },)
+    expected_signature = hashlib.sha256(
+        json.dumps(expected_candidates, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert event["extra_attrs"]["consolidation_signature"] == expected_signature
 
 
 def test_bootstrap_regenerates_history_after_writing_pages(tmp_path, monkeypatch):

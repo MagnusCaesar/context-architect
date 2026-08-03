@@ -242,7 +242,14 @@ def consolidation_candidates(nodes: list[Node]) -> tuple[dict, ...]:
     """Suggest exact shared bases for three or more live heads; never mutate nodes."""
     groups: dict[tuple[str, str], set[str]] = {}
     for node in nodes:
-        if node.archived or node.parent or node.status in TERMINAL_STATUSES.get(node.kind, set()):
+        valid_statuses = STATUSES.get(node.kind)
+        if (
+            not valid_statuses
+            or node.status not in valid_statuses
+            or node.archived
+            or node.parent
+            or node.status in TERMINAL_STATUSES[node.kind]
+        ):
             continue
         bases = {_normalized_basis("affects", value) for value in node.affects}
         bases.add(_normalized_basis("topic", node.topic))
@@ -332,6 +339,12 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
 
     one = {node_id: group[0] for node_id, group in by_id.items()}
     for node in nodes:
+        relative_path = node.path.relative_to(context_root).as_posix()
+        terminal_archive = node.archived and node.status in TERMINAL_STATUSES.get(node.kind, set())
+        if terminal_archive and not node.archived_at:
+            errors.append((node.path, f"{relative_path}: missing archived-at timestamp"))
+        elif node.archived_at and _parse_timestamp(node.archived_at) is None:
+            errors.append((node.path, f"{relative_path}: invalid archived-at timestamp {node.archived_at}"))
         if not _is_v2(node.path):
             continue
         expected_dir = {"wiki": "wiki", "decision": "decisions", "failure": "failure-todos", "work": "workstreams"}.get(node.kind)
@@ -342,9 +355,6 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
             errors.append((node.path, f"invalid {node.kind} status {node.status}"))
         if not node.statement:
             errors.append((node.path, "missing durable statement"))
-        if node.archived_at and _parse_timestamp(node.archived_at) is None:
-            relative_path = node.path.relative_to(context_root).as_posix()
-            errors.append((node.path, f"{relative_path}: invalid archived-at timestamp {node.archived_at}"))
         references = ((node.parent,) if node.parent else ()) + node.children + node.related + node.tracks + node.affects
         for reference in references:
             for message in _link_errors(context_root, node, reference):

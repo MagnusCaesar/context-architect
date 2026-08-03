@@ -17,12 +17,13 @@ BOOTSTRAP = SCRIPTS / "bootstrap.py"
 def node(node_id, kind, status, *, parent="", children="", archived=False):
     parent_meta = f'<meta name="parent" content="{parent}">' if parent else ""
     children_meta = f'<meta name="children" content="{children}">' if children else ""
+    archived_meta = '<meta name="archived-at" content="2026-01-01T00:00:00Z">' if archived else ""
     return f"""<!doctype html><html><head>
 <meta name="contract-version" content="2">
 <meta name="node-id" content="{node_id}">
 <meta name="kind" content="{kind}">
 <meta name="status" content="{status}">
-{parent_meta}{children_meta}
+{parent_meta}{children_meta}{archived_meta}
 </head><body><article data-statement="{node_id} statement."><p class="statement">{node_id} statement.</p>""" + (
         "</article></body></html>" if archived else
         f'<a href="{children}">child</a></article></body></html>'
