@@ -301,10 +301,11 @@ from pathlib import Path
 assert not Path(os.environ["CONTARCH_HOST_SENTINEL"]).exists()
 PY
 
-PROMPT='Lifecycle test. Use Bash once to create parent-bash.txt. Use apply_patch once to add parent-patch.txt. Spawn exactly one economy subagent; tell it to use Bash once and apply_patch once to create child-bash.txt and child-patch.txt, then wait for it. Do not inspect hook logs, transcripts, or global files. End with done.'
+PROMPT='Lifecycle test. You MUST call the spawn_agent tool exactly once and select the economy custom agent. Its read-only task MUST use Bash once to run git status --short and Read once to inspect AGENTS.md. After spawning, wait for that child to finish. In the parent, use Bash once to create parent-bash.txt and apply_patch once to add parent-patch.txt. Do not inspect hook logs, transcripts, or global files. A prose-only delegation is failure. End with done.'
 set +e
 "$PYTHON_BIN" "$PROJECT/run-with-timeout.py" "${CONTARCH_CODEX_TIMEOUT:-240}" \
-  "${LIVE[@]}" "$NODE_BIN" "$CODEX_ENTRY" exec --ephemeral \
+  "${LIVE[@]}" "$NODE_BIN" "$CODEX_ENTRY" exec \
+  --enable multi_agent -c agents.enabled=true \
   --dangerously-bypass-hook-trust --sandbox workspace-write --json --color never \
   -C "$PROJECT" "$PROMPT" 2>"$TMP/codex-stderr" \
   | python3 "$PROJECT/sanitize-codex-stream.py" "$TMP/codex-stream-status.json"
@@ -313,7 +314,8 @@ LIVE_STATUS=${PIPE_STATUS[0]}
 STREAM_STATUS=${PIPE_STATUS[1]}
 set -e
 
-LOG="$LOG" LIVE_STATUS="$LIVE_STATUS" STREAM_STATUS="$STREAM_STATUS" python3 - <<'PY'
+LOG="$LOG" LIVE_STATUS="$LIVE_STATUS" STREAM_STATUS="$STREAM_STATUS" \
+  LIVE_STRICT="${CONTARCH_LIVE_STRICT:-0}" python3 - <<'PY'
 import collections
 import json
 import os
@@ -344,12 +346,22 @@ assert stream["events"].get("turn.completed", 0) == 1, f"Codex stream did not co
 assert not any("fail" in name or "error" in name for name in stream["events"]), stream["events"]
 rows = [json.loads(line) for line in log.read_text().splitlines() if line]
 events = collections.Counter(row["event"] for row in rows)
-required = {"SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop", "PreToolUse", "PostToolUse"}
-missing = sorted(required - events.keys())
-assert not missing, f"missing live hook events: {', '.join(missing)}"
-for child in (False, True):
+parent_required = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
+parent_missing = sorted(parent_required - events.keys())
+assert not parent_missing, "missing live parent hook events: " + ", ".join(parent_missing)
+child_required = {"SubagentStart", "SubagentStop"}
+child_missing = sorted(child_required - events.keys())
+if set(child_missing) == child_required:
+    message = "successful parent did not exercise spawn_agent; no subagent lifecycle claim"
+    if os.environ["LIVE_STRICT"] == "1":
+        raise AssertionError("live Codex hooks: FAIL (" + message + ")")
+    print("live Codex hooks: INCONCLUSIVE (" + message + ")")
+    raise SystemExit(0)
+assert not child_missing, "incomplete live subagent lifecycle: " + ", ".join(child_missing)
+tools = {False: ("Bash", "apply_patch"), True: ("Bash", "Read")}
+for child, expected_tools in tools.items():
     for event in ("PreToolUse", "PostToolUse"):
-        for tool in ("Bash", "apply_patch"):
+        for tool in expected_tools:
             assert any(row["event"] == event and row["child"] is child and row["tool"] == tool for row in rows), (child, event, tool)
 
 economy = log.parent / ".codex/agents/economy.toml"

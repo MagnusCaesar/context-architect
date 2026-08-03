@@ -178,6 +178,99 @@ lock their own page during fan-out. `agentRoles` in `config.json` maps explicit
 agent IDs to other roles — pin an ID to `readonly` to deny it, or to
 `orchestrator` to grant record-any/break-lock/update-tracks.
 
+## Task Capsules And Receipts
+
+Task capsules are the only model-visible projection of context hygiene. They
+contain a one-line task, expected result, canonical scope, role, and only
+relevant durable nodes with exact `path#fragment` links. A graph node is eligible
+only when its `<meta name="visibility">` is `agent`, `model`, or `public`, its
+status is active for its graph kind, and it intersects scope or is named by an
+exact task link. Ledger, mutex, receipt, registry, archive, and hygiene mechanics
+must not appear in capsule text.
+
+Capsules have hard ceilings of 4,000 characters and eight nodes. Configuration
+may lower, never raise, either ceiling. Construction fails closed unless the
+context root is canonical. The same root is shared by every Git worktree.
+
+Each capsule appends one `task_capsule` receipt to the canonical ledger. The
+receipt records project identity, session/turn, task/result/scope/links, role,
+node ids, source-file SHA-256 values, character budget, and a digest over the
+record. Restoration requires one uniquely matching ledger record, valid digest
+and schema, the same project, canonical scope, and still-relevant nodes; it then
+records `restoration_of` lineage. Receipts are audit evidence, never model
+context.
+
+## Runtime Lifecycle Hooks
+
+One shared dispatcher normalizes Claude and Codex inputs. Bootstrap merges hooks
+by managed identity, preserves unrelated hooks and order, and removes only known
+legacy context-architecture entries. Runtime guarantees exist only after hooks
+are installed and observed on that runtime; dated observations belong in
+`docs/codex-compatibility.md`.
+
+| Event | Contract |
+|-------|----------|
+| `SessionStart` | No model payload; lifecycle registration only. |
+| `UserPromptSubmit` | Inject a capsule only for one unambiguous Firstmate project route. |
+| `PreCompact` / `PostCompact` | Pre is inert; Post restores the latest session receipt when one exists. |
+| `PreToolUse` | Validate edit paths, ownership, locks, and permission before mutation; malformed or multi-root edits fail closed. |
+| `PostToolUse` | Record context reads; run bounded validation/freshness feedback after relevant tools. |
+| `SubagentStart` | Inject one bounded capsule when a task is present. |
+| `SubagentStop` | Surface validation failure and request at most one continuation per hashed session/agent identity. State is private, mutex-protected, atomic, and mode `0600`. |
+| `Stop` / `SessionEnd` | Append a private capture candidate from an explicit final message. `SessionEnd` never reads a transcript path. |
+
+Inline diagnostics are bounded; oversized diagnostics spill to a private file
+and expose only its relative path. Hook payloads allowlist known fields and
+redact unknown/secret-shaped data.
+
+## Firstmate
+
+Global scope uses the neutral private root
+`${XDG_DATA_HOME:-$HOME/.local/share}/context-architecture/firstmate`, overridden
+only by `CONTEXT_ARCH_FIRSTMATE`. Git initialization is opt-in. Migration copies
+a legacy root into this location and preserves the source.
+
+Firstmate stores an allowlisted project registry, a private capture inbox, and
+validation state. Review output is limited to registered names, roots, short
+status, and summary. Framework work stays in Firstmate; project work routes only
+when a prompt/task matches exactly one registered project name or path. The
+resulting capsule is built from that project's canonical context and must not
+expose any other registered project.
+
+## Codex Model Role Policy
+
+Semantic roles replace provider-specific names:
+
+| Role | Desired policy | Current direct-surface fallback |
+|------|----------------|---------------------------------|
+| `lead` (Opus-equivalent) | `gpt-5.6-sol` / `high` | same |
+| `balanced` (Sonnet-equivalent) | `gpt-5.6-terra` / `medium` | same |
+| `economy` (Haiku-equivalent) | `gpt-5.6-luna` / `medium` | `gpt-5.6-terra` / `low` while direct Luna selection is rejected |
+
+Generated `.codex/agents/*.toml` profiles disclose desired and actual values.
+Subagents isolate conversation threads, not filesystems; they inherit active
+hook composition and parent safety overrides. Parallel writers therefore use
+separate Git worktrees sharing the canonical context root.
+
+Only explicit Codex refresh may query `codex app-server --stdio`. It must perform
+`initialize`, send `initialized`, consume every `model/list` page, and strictly
+validate identities, visibility, efforts, and upgrade metadata. A role changes
+only for one unambiguous advertised upgrade target that is present and visible;
+unsupported effort uses that target's documented default. Missing, hidden,
+conflicting, malformed, timed-out, or unavailable data preserves installed
+profiles.
+
+Policy/config/profile files are one compare-and-swap bundle: stage beside each
+destination, validate JSON/TOML and required fields, verify baseline digests,
+atomically replace, and roll back every partial replacement on failure.
+
+## Source Edit Authorization
+
+Project source may change only when the user supplies both a named target and an
+action verb in `fix`, `change`, `edit`, `update`, `modify`, `add`, or `remove`.
+Otherwise investigate, report, propose the exact patch, and request approval.
+Context HTML is coordination infrastructure and may be updated by its lifecycle.
+
 ## Decision Graph
 
 Decision entries are durable rationale, not event history.

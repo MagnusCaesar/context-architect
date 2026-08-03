@@ -12,9 +12,10 @@ This page records Codex facts and evidence boundaries. Behavioral schemas remain
 | Hook schemas | Repository Claude/Codex fixtures plus local project-hook probe |
 | Subagents | Separate conversation threads; shared cwd and shared filesystem |
 
-The 2026-08-02 fresh gate reconfirmed `codex-cli 0.146.0` and the required
-`exec` flags: `--ephemeral`, `--dangerously-bypass-hook-trust`, `--sandbox
-workspace-write`, `--json`, and `--color never`.
+The 2026-08-02 fresh gate reconfirmed `codex-cli 0.146.0`, native
+`--enable multi_agent`, and the required `exec` flags:
+`--dangerously-bypass-hook-trust`, `--sandbox workspace-write`, `--json`, and
+`--color never`. The isolated harness also sets `agents.enabled=true`.
 
 Official watch sources: [Codex changelog](https://developers.openai.com/codex/changelog/), [hooks](https://developers.openai.com/codex/hooks/), [subagents](https://developers.openai.com/codex/subagents/), [AGENTS.md](https://developers.openai.com/codex/guides/agents-md/), and [app server](https://developers.openai.com/codex/app-server/).
 
@@ -26,10 +27,10 @@ A local 2026-08-02 probe observed project hooks on subagent lifecycle and child 
 
 | Event | Earlier local probe | Fresh isolated E2E |
 |---|---|---|
-| `SessionStart` | observed | inconclusive: run stopped at authentication |
-| `UserPromptSubmit` | observed | inconclusive: run stopped at authentication |
-| `SubagentStart` / `SubagentStop` | observed | inconclusive: no model turn ran |
-| parent/child `PreToolUse` / `PostToolUse` | observed | inconclusive: no model turn ran |
+| `SessionStart` | observed | observed |
+| `UserPromptSubmit` | observed | observed |
+| `SubagentStart` / `SubagentStop` | observed | inconclusive: successful parent did not call `spawn_agent` |
+| parent/child `PreToolUse` / `PostToolUse` | observed | parent observed; child unexercised |
 | `Stop` / `SessionEnd` | not captured in bounded run | inconclusive |
 
 The fresh harness used temporary project hooks and temporary writable
@@ -37,11 +38,13 @@ The fresh harness used temporary project hooks and temporary writable
 directories, the exact Node/Codex installation, the temporary project, and
 read-only `auth.json`/`config.toml` mounts. It does not bind `/`; a sentinel
 proves every other host `~/.codex` path is inaccessible. Credentials are never
-copied. Both API-key environment variables were absent, and the isolated run
-was rejected by the Responses websocket with HTTP 401. The harness records
-allowlisted schema keys only, redacts unknown key names, rejects any non-JSON
-stdout even beside `turn.completed`, and uses a Python stdlib process-group
-timeout. Writable `~/.codex` was not used.
+copied. Both API-key environment variables were absent. An earlier attempt was
+rejected with HTTP 401; the latest read-only-auth attempt completed a parent
+turn but did not exercise `spawn_agent`. That exact outcome is reported as
+inconclusive, never as lifecycle pass; `CONTARCH_LIVE_STRICT=1` makes it fail.
+The harness records allowlisted schema keys only, redacts unknown key names,
+rejects any non-JSON stdout even beside `turn.completed`, and uses a Python
+stdlib process-group timeout. Writable `~/.codex` was not used.
 
 Subagent context isolation means a separate conversation thread, not a separate machine or checkout. Subagents still receive applicable system/project instructions. They share cwd and filesystem unless the orchestrator deliberately assigns a worktree. Therefore:
 
@@ -90,7 +93,7 @@ Not verified as a durable guarantee:
 - Future Codex hook names or payload fields not present in fixtures.
 - Hook inheritance behavior after later CLI releases.
 - Direct Luna override support after later model releases.
-- Actual economy child execution in the fresh E2E; isolated authentication failed before a model turn, so only generated-profile fallback was verified.
+- Actual economy child execution in the fresh E2E; the parent completed without calling `spawn_agent`, so only generated-profile fallback was verified.
 - Remote sandbox, MCP/plugin, IDE, or wrapper-specific policies.
 - `Stop` and `SessionEnd` in a completed live run.
 
