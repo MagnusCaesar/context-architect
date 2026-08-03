@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from context_utils import resolve_context_page, today_utc, write_atomic
-from hook_dispatch import merge_hook_config
+from hook_dispatch import LEGACY_HOOK_NAMES, merge_hook_config
 from platforms import (PlatformError, install_bootloaders, managed_hook_config,
                        platform_choice, platform_homes, preflight_bootloaders,
                        resolve_platform)
@@ -285,113 +285,6 @@ def normalize_pages(pages):
     return normalized
 
 
-CLAUDE_HOOKS_SETTINGS = {
-    "hooks": {
-        "UserPromptSubmit": [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "bash context/hooks/remind-capture-decision.sh",
-                    }
-                ],
-            }
-        ],
-        "PreToolUse": [
-            {
-                "matcher": "Edit|Write",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "bash context/hooks/pre-edit-context-inject.sh",
-                    }
-                ],
-            }
-        ],
-        "PostToolUse": [
-            {
-                "matcher": "Edit|Write",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "bash context/hooks/post-edit-validate-and-stale.sh",
-                    }
-                ],
-            }
-        ],
-    }
-}
-
-_STOP_HOOK = {
-    "Stop": [
-        {"hooks": [
-            {"type": "command", "command": "bash context/hooks/capture-on-stop.sh"},
-            {"type": "command", "command": "bash context/hooks/auto-commit-context.sh"},
-        ]}
-    ]
-}
-# Commit context when a SUBAGENT finishes editing too (subagents do most edits;
-# whoever held the lock commits when they finish, which releases the lock).
-_SUBAGENT_STOP_HOOK = {
-    "SubagentStop": [
-        {"hooks": [
-            {"type": "command", "command": "bash context/hooks/auto-commit-context.sh"},
-        ]}
-    ]
-}
-_SESSION_START_HOOK = {
-    "SessionStart": [
-        {"hooks": [{"type": "command",
-                    "command": "bash context/hooks/session-start-inject.sh"}]}
-    ]
-}
-_SUBAGENT_START_HOOK = {
-    "SubagentStart": [
-        {"hooks": [{"type": "command",
-                    "command": "bash context/hooks/subagent-start-inject.sh"}]}
-    ]
-}
-_READ_DIRECTION_UPS = {"type": "command",
-                       "command": "bash context/hooks/remind-context-read.sh"}
-_READ_DIRECTION_POST = {
-    "matcher": "Read",
-    "hooks": [{"type": "command",
-               "command": "bash context/hooks/post-read-context-gate.sh"}]
-}
-
-def hooks_for_scope(scope: str) -> dict:
-    """Return the hooks dict to register for the given scope."""
-    hooks = json.loads(json.dumps(CLAUDE_HOOKS_SETTINGS["hooks"]))  # deep copy
-    hooks.update(_STOP_HOOK)                 # both scopes capture + commit on Stop
-    hooks.update(_SUBAGENT_STOP_HOOK)        # commit when a subagent finishes editing
-    hooks.update(_SUBAGENT_START_HOOK)       # both scopes inject into subagents
-    # read-direction: append remind-context-read to UserPromptSubmit, add Read gate
-    hooks["UserPromptSubmit"][0]["hooks"].append(dict(_READ_DIRECTION_UPS))
-    hooks.setdefault("PostToolUse", []).append(dict(_READ_DIRECTION_POST))
-    if scope == "global":
-        hooks.update(_SESSION_START_HOOK)    # global also injects at session start
-    # Final deep copy so the returned dict shares no nested objects with the
-    # module-level fragments spliced in above (the contract is "independent dict").
-    return json.loads(json.dumps(hooks))
-
-
-def absolutize_hooks(hooks: dict, target: Path) -> dict:
-    """Rewrite 'bash context/hooks/X' commands to absolute paths.
-
-    Hooks fire with the session's cwd, which is not always the project root, so
-    relative 'context/hooks/...' fails from any subdir. Anchor them to target.
-    """
-    prefix = "bash context/hooks/"
-    abs_base = f"bash {target.resolve()}/context/hooks/"
-    for groups in hooks.values():
-        for g in groups:
-            for h in g.get("hooks", []):
-                cmd = h.get("command", "")
-                if cmd.startswith(prefix):
-                    h["command"] = abs_base + cmd[len(prefix):]
-    return hooks
-
-
 def install_git_hook(repo_dir: Path, hooks_src: Path, name: str) -> bool:
     """Install a named git hook into repo_dir's real hooks dir.
 
@@ -459,6 +352,18 @@ def install_pre_commit(context_dir: Path, hooks_src: Path, config: dict | None) 
         if install_git_hook(repo_dir, hooks_src, "pre-commit"):
             installed.append(str(repo_dir))
     return installed
+
+
+def reconcile_legacy_hook_files(context_dir: Path) -> list[str]:
+    """Remove only known superseded lifecycle wrappers from a generated target."""
+    removed = []
+    hooks_dir = context_dir / "hooks"
+    for name in sorted(LEGACY_HOOK_NAMES):
+        path = hooks_dir / name
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+            removed.append(name)
+    return removed
 
 
 def install_platform_hooks(target: Path, platforms, scope: str = "project") -> None:
@@ -532,6 +437,8 @@ def refresh_context(target: Path, platforms) -> dict:
         for hook in hooks_src.glob("*.sh"):
             shutil.copy2(hook, hooks_dst / hook.name)
             updated.append(f"hooks/{hook.name}")
+    for name in reconcile_legacy_hook_files(context_dir):
+        updated.append(f"removed hooks/{name}")
 
     # Install/refresh git post-commit hook
     if install_post_commit(context_dir, hooks_src):
@@ -714,6 +621,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     if hooks_src.exists():
         for hook in hooks_src.glob("*.sh"):
             shutil.copy2(hook, hooks_dst / hook.name)
+    reconcile_legacy_hook_files(context_dir)
 
     # Install git post-commit hook for auto-release
     install_post_commit(context_dir, hooks_src)

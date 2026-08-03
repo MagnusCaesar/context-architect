@@ -146,7 +146,9 @@ def managed_hook_config(platform: str, target: Path, scope: str = "project") -> 
             f"--context-root {shlex.quote(str(context))} --managed-group context-architecture"
         )
         group = {"hooks": [{"type": "command", "command": command}]}
-        if event in {"PreToolUse", "PostToolUse"}:
+        if event == "PreToolUse":
             group["matcher"] = "Edit|Write|apply_patch"
+        elif event == "PostToolUse":
+            group["matcher"] = "Read|Edit|Write|apply_patch"
         hooks[event] = [group]
     return {"hooks": hooks}

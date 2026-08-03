@@ -2,18 +2,35 @@
 """Canonical stdin JSON hook adapter for Claude and Codex."""
 
 import argparse
+import fnmatch
+import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from context_utils import read_config, read_meta, tracks_status
 
 
 MANAGED_GROUP = "context-architecture"
 CAPSULE_LIMIT = 800
+RECEIPT_LIMIT = 65536
+RECEIPT_MAX_AGE = 3600
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$")
 MOVE_PATH = re.compile(r"^\*\*\* Move to: (.+)$")
+SECRET = re.compile(r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*\S+")
+LEGACY_HOOK_NAMES = frozenset({
+    "auto-commit-context.sh", "capture-on-stop.sh", "post-edit-validate-and-stale.sh",
+    "post-edit-validate.sh", "post-read-context-gate.sh", "pre-edit-context-gate.sh",
+    "pre-edit-context-inject.sh", "pre-edit-lock-check.sh", "remind-capture-decision.sh",
+    "remind-context-read.sh", "session-start-inject.sh", "subagent-start-inject.sh",
+})
+READ_ONLY_PARTS = frozenset({"input_rpts", "processed", "logs"})
 
 
 @dataclass(frozen=True)
@@ -32,6 +49,9 @@ class Event:
     model: str
     prompt: str
     final_message: str
+    role: str
+    task: str
+    scope: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -71,6 +91,17 @@ def _safe_path(raw: object) -> tuple[Path | None, str | None]:
     return path, None
 
 
+def _clean(value: object, limit: int = 240) -> str:
+    text = " ".join(str(value or "").split())
+    text = SECRET.sub(lambda match: f"{match.group(1)}=[redacted]", text)
+    return text[:limit]
+
+
+def _scope(value: object) -> tuple[str, ...]:
+    values = value if isinstance(value, (list, tuple)) else [value]
+    return tuple(clean for clean in (_clean(item, 160) for item in values[:8]) if clean)
+
+
 def _patch_paths(command: object) -> tuple[tuple[Path, ...], tuple[str, ...]]:
     if not isinstance(command, str):
         return (), ()
@@ -107,7 +138,7 @@ def normalize_event(event_name, payload) -> Event:
     platform = str(data.get("platform") or ("claude" if data.get("hook_event_name") else "codex"))
     paths: tuple[Path, ...] = ()
     unsafe: tuple[str, ...] = ()
-    if tool in {"Edit", "Write"}:
+    if tool in {"Edit", "Write", "Read"}:
         path, bad = _safe_path(tool_input.get("file_path"))
         paths = (path,) if path else ()
         unsafe = (bad,) if bad else ()
@@ -130,6 +161,9 @@ def normalize_event(event_name, payload) -> Event:
         model=str(data.get("model") or ""),
         prompt=str(data.get("prompt") or data.get("user_prompt") or ""),
         final_message=str(data.get("final_message") or ""),
+        role=_clean(data.get("agent_type") or data.get("role") or tool_input.get("agent_type") or tool_input.get("role")),
+        task=_clean(data.get("task") or data.get("task_name") or tool_input.get("task_name") or tool_input.get("message")),
+        scope=_scope(data.get("scope") or tool_input.get("scope") or ()),
     )
 
 
@@ -173,29 +207,169 @@ def _freshness_update(context_root: Path) -> str:
     return _bounded((completed.stdout + completed.stderr).strip(), context_root, "freshness")
 
 
+def _receipt_path(context_root: Path, session_id: str) -> Path:
+    key = hashlib.sha256((session_id or "anonymous").encode()).hexdigest()[:20]
+    return context_root / ".hook-receipts" / f"{key}.json"
+
+
+def _capsule(event: Event) -> str:
+    fields = [
+        f"agent={_clean(event.agent_id, 120)}" if event.agent_id else "",
+        f"role={event.role}" if event.role else "",
+        f"task={event.task}" if event.task else "",
+        f"scope={', '.join(event.scope)}" if event.scope else "",
+    ]
+    content = "; ".join(field for field in fields if field)
+    return f"Child context: {content}" if content else ""
+
+
+def _record_receipt(event: Event, context_root: Path) -> None:
+    path = _receipt_path(context_root, event.session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps({
+        "created_at": time.time(), "session": event.session_id, "turn": event.turn_id,
+        "capsule": _capsule(event),
+    }, separators=(",", ":")) + "\n"
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as handle:
+        handle.write(data)
+        staged = Path(handle.name)
+    staged.replace(path)
+
+
+def _restore_receipt(event: Event, context_root: Path) -> str:
+    path = _receipt_path(context_root, event.session_id)
+    if not path.exists():
+        return ""
+    if path.stat().st_size > RECEIPT_LIMIT:
+        return "Compaction receipt ignored: oversized."
+    try:
+        data = json.loads(path.read_text())
+        created = float(data.get("created_at", 0))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return ""
+    if data.get("session") != event.session_id or time.time() - created > RECEIPT_MAX_AGE:
+        return ""
+    capsule = _clean(data.get("capsule"), CAPSULE_LIMIT)
+    return capsule if capsule else ""
+
+
+def _read_marker(context_root: Path, session_id: str, page: Path) -> Path:
+    session = hashlib.sha256((session_id or "anonymous").encode()).hexdigest()[:16]
+    name = hashlib.sha256(page.as_posix().encode()).hexdigest()[:16]
+    return context_root / ".hook-reads" / session / name
+
+
+def _mark_context_reads(event: Event, context_root: Path) -> None:
+    for path in event.paths:
+        if len(path.parts) < 2 or path.parts[0] != "context":
+            continue
+        page = Path(*path.parts[1:])
+        marker = _read_marker(context_root, event.session_id, page)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+
+
+def _tracking_pages(path: Path, context_root: Path) -> tuple[Path, ...]:
+    rel = path.as_posix()
+    pages = []
+    for page in sorted(context_root.rglob("*.html")):
+        if "docs" in page.parts:
+            continue
+        tracking = tracks_status(page)
+        if tracking["status"] != "tracked":
+            continue
+        if any(rel == pattern or fnmatch.fnmatch(rel, pattern) for pattern in tracking["tracks"]):
+            pages.append(page.relative_to(context_root))
+    return tuple(pages)
+
+
+def _lock_gate(path: Path, event: Event, context_root: Path) -> Result:
+    if len(path.parts) < 2 or path.parts[0] != "context" or path.suffix != ".html" or path.name == "index.html":
+        return Result()
+    page = context_root / Path(*path.parts[1:])
+    if not page.exists():
+        return Result()
+    locked, owner = read_meta(page, "locked"), read_meta(page, "locked-by")
+    agent = event.agent_id or f"hook-{event.session_id or 'session'}"
+    if locked == "true" and owner in {agent, "orchestrator", ""}:
+        return Result()
+    if read_config(context_root).get("autoAcquireOnEdit") is False:
+        if locked == "true":
+            return block(f"{path.as_posix()} is locked by {owner or 'another agent'}; run start-task.py first")
+        return block(f"{path.as_posix()} is not locked; run start-task.py first")
+    script = context_root / "scripts" / "start-task.py"
+    if not script.exists():
+        return block(f"{path.as_posix()} is not locked; run start-task.py first")
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(script), "--page", page.relative_to(context_root).as_posix(),
+             "--agent-id", agent, "--intent", "auto-acquire on edit", "--lines", "5", "--files", "1"],
+            cwd=context_root.parent, text=True, capture_output=True, timeout=12,
+        )
+        status = json.loads(completed.stdout).get("status")
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        status = ""
+    if status in {"acquired", "broke_stale_lock"}:
+        return Result()
+    return block(f"cannot acquire lock on {path.as_posix()}; run start-task.py first")
+
+
+def _edit_gate(event: Event, context_root: Path) -> Result:
+    if event.unsafe_paths:
+        return block("edit paths must stay inside the project")
+    missing = []
+    relevant = []
+    project_root = context_root.parent.resolve()
+    for path in event.paths:
+        target = (project_root / path).resolve()
+        try:
+            target.relative_to(project_root)
+        except ValueError:
+            return block("edit paths must stay inside the project")
+        if READ_ONLY_PARTS.intersection(path.parts):
+            return block(f"{path.as_posix()} is in a read-only source directory")
+        locked = _lock_gate(path, event, context_root)
+        if not locked.allow:
+            return locked
+        if not path.parts or path.parts[0] in {"context", ".claude", ".codex"} or path.name in {"AGENTS.md", "CLAUDE.md", "MEMORY.md"}:
+            continue
+        for page in _tracking_pages(path, context_root):
+            relevant.append(page)
+            if not _read_marker(context_root, event.session_id, page).exists():
+                missing.append(page)
+    if missing:
+        pages = ", ".join(f"context/{page.as_posix()}" for page in dict.fromkeys(missing))
+        edited = ", ".join(path.as_posix() for path in event.paths)
+        return block(f"read {pages} before editing {edited}")
+    context = "Relevant context: " + ", ".join(f"context/{page.as_posix()}" for page in dict.fromkeys(relevant)) if relevant else ""
+    return Result(context=_bounded(context, context_root, event.name) if context else "")
+
+
 def dispatch(event: Event, context_root) -> Result:
     """Run the small shared lifecycle policy; matching hooks need no ordering."""
     root = Path(context_root)
     if event.name == "PreToolUse":
-        if event.unsafe_paths:
-            return block("edit paths must stay inside the project")
-        return Result()
+        return _edit_gate(event, root)
     if event.name == "SessionStart":
         return Result(context=_bounded("Read context/index.html before changing tracked work.", root, event.name))
     if event.name == "UserPromptSubmit":
         if re.search(r"\b(decision|failure|open question)\b", event.prompt, re.I):
             return Result(context="Capture durable decisions, failures, or open questions in context/capture-inbox.html.")
         return Result()
-    if event.name in {"PreCompact", "PostCompact"}:
-        receipt = root / ".hook-receipt.json"
-        receipt.write_text(json.dumps({"event": event.name, "session": event.session_id, "turn": event.turn_id}) + "\n")
+    if event.name == "PreCompact":
+        _record_receipt(event, root)
         return Result(context="Context receipt recorded; restore only the current task capsule.")
+    if event.name == "PostCompact":
+        return Result(context=_restore_receipt(event, root))
     if event.name == "PostToolUse":
+        if event.tool == "Read":
+            _mark_context_reads(event, root)
+            return Result()
         if event.paths and any(p.parts and p.parts[0] == "context" for p in event.paths):
             return Result(context=_validation_failure(root))
         return Result(context=_freshness_update(root) if event.paths else "")
     if event.name == "SubagentStart":
-        return Result(context=_bounded("Child scope: use the assigned task and context links only.", root, event.name))
+        return Result(context=_bounded(_capsule(event), root, event.name))
     if event.name == "SubagentStop":
         failure = _validation_failure(root)
         return Result(context=failure, continue_=bool(failure))
@@ -220,6 +394,8 @@ def render_codex_result(result: Result, event_name: str) -> dict:
 
 
 def render_claude_result(result: Result, event_name: str) -> dict:
+    if result.continue_ and event_name == "SubagentStop":
+        return {"decision": "block", "reason": result.context or result.reason}
     if not result.allow:
         return {"decision": "block", "reason": result.reason}
     output = {"hookEventName": event_name}
@@ -228,8 +404,44 @@ def render_claude_result(result: Result, event_name: str) -> dict:
     return {"hookSpecificOutput": output}
 
 
-def _managed(group: object) -> bool:
-    return MANAGED_GROUP in json.dumps(group, sort_keys=True)
+def _command_tokens(hook: object) -> list[str]:
+    command = hook.get("command") if isinstance(hook, dict) else None
+    if not isinstance(command, str):
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return []
+
+
+def _managed_hook(hook: object) -> bool:
+    tokens = _command_tokens(hook)
+    return any(
+        token == f"--managed-group={MANAGED_GROUP}"
+        or token == "--managed-group" and index + 1 < len(tokens) and tokens[index + 1] == MANAGED_GROUP
+        for index, token in enumerate(tokens)
+    )
+
+
+def _legacy_hook(hook: object) -> bool:
+    for token in _command_tokens(hook):
+        path = Path(token)
+        if path.name not in LEGACY_HOOK_NAMES or len(path.parts) < 3 or path.parts[-2] != "hooks":
+            continue
+        if path.parts[-3] in {"context", "context-architecture"}:
+            return True
+    return False
+
+
+def _reconcile_group(group: object):
+    if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+        return group
+    kept = [hook for hook in group["hooks"] if not (_managed_hook(hook) or _legacy_hook(hook))]
+    if not kept:
+        return None
+    cleaned = json.loads(json.dumps(group))
+    cleaned["hooks"] = kept
+    return cleaned
 
 
 def merge_hook_config(existing, managed):
@@ -248,7 +460,7 @@ def merge_hook_config(existing, managed):
         return merged
     for event_name, groups in list(hooks.items()):
         if isinstance(groups, list):
-            kept = [group for group in groups if not _managed(group)]
+            kept = [cleaned for group in groups if (cleaned := _reconcile_group(group)) is not None]
             if kept:
                 hooks[event_name] = kept
             else:

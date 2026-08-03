@@ -59,23 +59,10 @@ def test_read_direction_hooks_registered():
         assert "--event UserPromptSubmit" in ups
         post = json.dumps(hooks["PostToolUse"])
         assert "--event PostToolUse" in post
+        assert "Read" in post
 
 
-def test_hooks_for_scope_returns_independent_dicts():
-    """Two calls must not share nested mutable objects (no aliasing to module globals)."""
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-    import bootstrap
-    a = bootstrap.hooks_for_scope("project")
-    b = bootstrap.hooks_for_scope("project")
-    # mutating one must not affect the other or the module globals
-    a["PostToolUse"][-1]["hooks"].append({"type": "command", "command": "X"})
-    assert b["PostToolUse"][-1]["hooks"] != a["PostToolUse"][-1]["hooks"]
-    assert all(h.get("command") != "X" for h in bootstrap._READ_DIRECTION_POST["hooks"])
-
-
-def test_stop_registers_capture_and_autocommit():
+def test_stop_registers_canonical_dispatcher():
     import json, subprocess, sys, tempfile
     from pathlib import Path
     SKILL = Path(__file__).resolve().parent.parent
@@ -86,12 +73,10 @@ def test_stop_registers_capture_and_autocommit():
         hooks = json.loads((Path(d) / ".claude" / "settings.json").read_text())["hooks"]
         stop = json.dumps(hooks["Stop"])
         assert "--event Stop" in stop
-        cfg = json.loads((Path(d) / "context" / "config.json").read_text())
-        assert cfg["autoCommitContext"] is True
 
 
 def test_hook_commands_are_absolute():
-    """Hooks must use absolute paths — relative context/hooks/ fails from subdirs."""
+    """Dispatcher commands must be absolute so hooks work from subdirectories."""
     import json, subprocess, sys, tempfile
     from pathlib import Path
     SKILL = Path(__file__).resolve().parent.parent

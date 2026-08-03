@@ -7,10 +7,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from hook_dispatch import (  # noqa: E402
+    Result,
     block,
     dispatch,
     merge_hook_config,
     normalize_event,
+    render_claude_result,
     render_codex_result,
 )
 from platforms import managed_hook_config  # noqa: E402
@@ -72,6 +74,11 @@ def test_pretool_block_uses_codex_permission_decision():
     }
 
 
+def test_claude_subagent_stop_continues_after_validation_failure():
+    result = render_claude_result(Result(context="context validation failed", continue_=True), "SubagentStop")
+    assert result == {"decision": "block", "reason": "context validation failed"}
+
+
 def test_dispatch_blocks_unsafe_edit_with_one_actionable_reason(tmp_path):
     event = normalize_event("PreToolUse", {"tool_name": "Write", "tool_input": {"file_path": "../escape.py"}})
     result = dispatch(event, tmp_path)
@@ -80,10 +87,38 @@ def test_dispatch_blocks_unsafe_edit_with_one_actionable_reason(tmp_path):
 
 
 def test_subagent_start_is_never_blocked_and_output_is_bounded(tmp_path):
-    event = normalize_event("SubagentStart", {"tool_name": "collaborationspawn_agent", "agent_id": "child"})
+    event = normalize_event("SubagentStart", {
+        "tool_name": "collaborationspawn_agent",
+        "agent_id": "child",
+        "agent_type": "worker",
+        "task": "audit hook routing",
+        "scope": ["scripts/hook_dispatch.py", "tests/test_hook_dispatch.py"],
+    })
     result = dispatch(event, tmp_path)
     assert result.allow
     assert len(result.context) <= 800
+    assert event.role == "worker"
+    assert event.task == "audit hook routing"
+    assert event.scope == ("scripts/hook_dispatch.py", "tests/test_hook_dispatch.py")
+    assert all(value in result.context for value in ("child", "worker", "audit hook routing", "scripts/hook_dispatch.py"))
+
+
+def test_subagent_start_redacts_secrets_before_bounded_injection(tmp_path):
+    event = normalize_event("SubagentStart", {
+        "agent_id": "child",
+        "agent_type": "worker",
+        "task": "audit TOKEN=supersecret " + "x" * 2000,
+        "scope": ["scripts/hook_dispatch.py"],
+    })
+    context = dispatch(event, tmp_path).context
+    assert len(context) <= 800
+    assert "supersecret" not in context
+    assert "[redacted]" in context
+
+
+def test_subagent_start_without_role_task_or_scope_injects_nothing(tmp_path):
+    event = normalize_event("SubagentStart", {"agent_id": ""})
+    assert dispatch(event, tmp_path).context == ""
 
 
 def test_subagent_stop_continues_only_when_validation_concretely_fails(tmp_path):
@@ -108,6 +143,87 @@ def test_post_edit_runs_shared_freshness_check_for_source_paths(tmp_path):
     assert (tmp_path / "freshness-ran").read_text() == "yes"
 
 
+def test_pretool_source_edit_requires_its_tracking_page_read(tmp_path):
+    project = tmp_path / "project"
+    context = project / "context"
+    context.mkdir(parents=True)
+    (context / "module.html").write_text('<meta name="tracks" content="src/a.py">')
+    edit = normalize_event("PreToolUse", {
+        "session_id": "session-1", "tool_name": "Edit", "tool_input": {"file_path": "src/a.py"},
+    })
+    denied = dispatch(edit, context)
+    assert not denied.allow
+    assert denied.reason == "read context/module.html before editing src/a.py"
+
+    read = normalize_event("PostToolUse", {
+        "session_id": "session-1", "tool_name": "Read", "tool_input": {"file_path": "context/module.html"},
+    })
+    assert dispatch(read, context).allow
+    assert dispatch(edit, context).allow
+
+
+def test_pretool_context_edit_enforces_existing_lock_owner(tmp_path):
+    project = tmp_path / "project"
+    context = project / "context"
+    context.mkdir(parents=True)
+    (context / "config.json").write_text(json.dumps({"autoAcquireOnEdit": False}))
+    (context / "decisions.html").write_text(
+        '<meta name="locked" content="true"><meta name="locked-by" content="other-agent">'
+    )
+    event = normalize_event("PreToolUse", {
+        "agent_id": "this-agent", "tool_name": "Edit", "tool_input": {"file_path": "context/decisions.html"},
+    })
+    result = dispatch(event, context)
+    assert not result.allow
+    assert result.reason == "context/decisions.html is locked by other-agent; run start-task.py first"
+
+
+def test_pretool_blocks_owned_read_only_source_directories(tmp_path):
+    event = normalize_event("PreToolUse", {
+        "tool_name": "Write", "tool_input": {"file_path": "logs/result.txt"},
+    })
+    result = dispatch(event, tmp_path / "context")
+    assert not result.allow
+    assert result.reason == "logs/result.txt is in a read-only source directory"
+
+
+def test_postcompact_missing_receipt_injects_nothing(tmp_path):
+    event = normalize_event("PostCompact", {"session_id": "session-1"})
+    assert dispatch(event, tmp_path).context == ""
+
+
+def test_postcompact_restores_fresh_bounded_receipt(tmp_path):
+    pre = normalize_event("PreCompact", {
+        "session_id": "session-1", "turn_id": "turn-1", "agent_type": "worker",
+        "task": "audit hook routing", "scope": ["scripts/hook_dispatch.py"],
+    })
+    dispatch(pre, tmp_path)
+    restored = dispatch(normalize_event("PostCompact", {"session_id": "session-1"}), tmp_path).context
+    assert "audit hook routing" in restored
+    assert "scripts/hook_dispatch.py" in restored
+    assert len(restored) <= 800
+
+
+def test_postcompact_ignores_stale_receipt(tmp_path):
+    pre = normalize_event("PreCompact", {"session_id": "session-1", "task": "stale task"})
+    dispatch(pre, tmp_path)
+    receipt = next((tmp_path / ".hook-receipts").glob("*.json"))
+    data = json.loads(receipt.read_text())
+    data["created_at"] = 0
+    receipt.write_text(json.dumps(data))
+    assert dispatch(normalize_event("PostCompact", {"session_id": "session-1"}), tmp_path).context == ""
+
+
+def test_postcompact_rejects_oversized_receipt_with_bounded_diagnostic(tmp_path):
+    pre = normalize_event("PreCompact", {"session_id": "session-1", "task": "task"})
+    dispatch(pre, tmp_path)
+    receipt = next((tmp_path / ".hook-receipts").glob("*.json"))
+    receipt.write_text("x" * 70000)
+    context = dispatch(normalize_event("PostCompact", {"session_id": "session-1"}), tmp_path).context
+    assert "oversized" in context.lower()
+    assert len(context) <= 800
+
+
 def test_merge_replaces_only_managed_entries_without_hook_order_assumption():
     existing = {
         "hooks": {
@@ -126,6 +242,22 @@ def test_merge_replaces_only_managed_entries_without_hook_order_assumption():
     assert any("user-check" in json.dumps(group) for group in merged["hooks"]["PreToolUse"])
     assert sum("--managed-group context-architecture" in json.dumps(group) for group in merged["hooks"]["PreToolUse"]) == 1
     assert merge_hook_config(merged, managed) == merged
+
+
+def test_merge_preserves_unrelated_command_containing_marker_text():
+    unrelated = {"matcher": "Edit", "hooks": [{"command": "echo context-architecture"}]}
+    existing = {"hooks": {"PreToolUse": [unrelated]}}
+    managed = {"hooks": {"PreToolUse": [{"hooks": [{"command": "python hook_dispatch.py --managed-group context-architecture"}]}]}}
+    merged = merge_hook_config(existing, managed)
+    assert unrelated in merged["hooks"]["PreToolUse"]
+
+
+def test_merge_removes_exact_legacy_wrapper_but_preserves_plugin_group():
+    legacy = {"hooks": [{"type": "command", "command": "bash /project/context/hooks/pre-edit-context-gate.sh"}]}
+    plugin = {"hooks": [{"type": "command", "command": "/plugin/pre-edit-context-gate.sh"}]}
+    existing = {"hooks": {"PreToolUse": [legacy, plugin]}}
+    merged = merge_hook_config(existing, {"hooks": {}})
+    assert merged["hooks"]["PreToolUse"] == [plugin]
 
 
 def test_merge_returns_invalid_json_bytes_unchanged():
@@ -154,3 +286,16 @@ def test_generated_dispatcher_command_quotes_a_space_in_the_project_path(tmp_pat
     command = managed_hook_config("codex", tmp_path / "dir with space")["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     words = shlex.split(command)
     assert words[1].endswith("dir with space/context/scripts/hook_dispatch.py")
+
+
+def test_refresh_removes_only_superseded_target_hook_files(tmp_path):
+    bootstrap = Path(__file__).resolve().parent.parent / "scripts" / "bootstrap.py"
+    subprocess.run([sys.executable, str(bootstrap), "--target", str(tmp_path), "--platform", "claude"], check=True, capture_output=True)
+    hooks = tmp_path / "context" / "hooks"
+    legacy = hooks / "pre-edit-context-gate.sh"
+    custom = hooks / "custom-project-hook.sh"
+    legacy.write_text("legacy")
+    custom.write_text("custom")
+    subprocess.run([sys.executable, str(bootstrap), "--target", str(tmp_path), "--refresh"], check=True, capture_output=True)
+    assert not legacy.exists()
+    assert custom.read_text() == "custom"
