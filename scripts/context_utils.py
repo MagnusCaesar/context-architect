@@ -18,11 +18,172 @@ from pathlib import Path
 
 CONTEXT_ONLY = "context-only"
 _HYGIENE_RUNNING = False
+CONTEXT_LOCATOR = "context-architecture.json"
+CONTEXT_LOCATOR_VERSION = 1
 
 
 class MutexTimeout(Exception):
     """Raised when context_mutex cannot be acquired within the configured ceiling."""
     pass
+
+
+class ContextRootError(RuntimeError):
+    """Raised when a Git context locator is absent or invalid."""
+
+
+def _git_common_dir(cwd: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+def _git_anchor(cwd: Path, common_dir: Path) -> Path:
+    if common_dir.name == ".git":
+        return common_dir.parent.resolve()
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise ContextRootError("cannot determine Git repository anchor") from exc
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            return Path(line.removeprefix("worktree ")).resolve()
+    raise ContextRootError("cannot determine Git repository anchor")
+
+
+def _repository_identity(common_dir: Path, anchor: Path) -> str:
+    value = f"{common_dir.resolve()}\0{anchor.resolve()}".encode()
+    return hashlib.sha256(value).hexdigest()
+
+
+def _local_context_root(cwd: Path) -> Path | None:
+    cwd = cwd.resolve()
+    for parent in [cwd, *cwd.parents]:
+        candidate = parent / "context"
+        if (candidate / "index.html").exists():
+            return candidate.resolve()
+    if (cwd / "index.html").exists():
+        return cwd
+    return None
+
+
+def _read_git_locator(cwd: Path, common_dir: Path) -> Path:
+    locator = common_dir / CONTEXT_LOCATOR
+    if not locator.exists():
+        raise ContextRootError(f"Git context locator missing: {locator}; run bootstrap")
+    if locator.is_symlink():
+        raise ContextRootError(f"Git context locator must not be a symlink: {locator}")
+    try:
+        data = json.loads(locator.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContextRootError(f"Git context locator malformed: {locator}") from exc
+    if not isinstance(data, dict):
+        raise ContextRootError(f"Git context locator malformed: {locator}")
+    if data.get("version") != CONTEXT_LOCATOR_VERSION:
+        raise ContextRootError(f"Git context locator has unsupported version: {data.get('version')!r}")
+
+    raw_path = data.get("path")
+    raw_anchor = data.get("anchor")
+    if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+        raise ContextRootError("Git context locator path must be absolute")
+    if not isinstance(raw_anchor, str) or not Path(raw_anchor).is_absolute():
+        raise ContextRootError("Git context locator anchor must be absolute")
+
+    expected_anchor = _git_anchor(cwd, common_dir)
+    anchor = Path(raw_anchor).resolve()
+    if anchor != expected_anchor:
+        raise ContextRootError(f"Git context locator anchor does not match repository: {anchor}")
+    if data.get("identity") != _repository_identity(common_dir, anchor):
+        raise ContextRootError("Git context locator identity does not match repository")
+
+    context_root = Path(raw_path).resolve()
+    try:
+        context_root.relative_to(anchor)
+    except ValueError as exc:
+        raise ContextRootError(f"Git context locator path is outside registered root: {context_root}") from exc
+    if not context_root.is_dir():
+        raise ContextRootError(f"Git context root does not exist: {context_root}")
+    if not (context_root / "index.html").is_file():
+        raise ContextRootError(f"Git context root is missing index.html: {context_root}")
+    return context_root
+
+
+def canonical_context_root(cwd: Path) -> Path:
+    """Resolve the one context root shared by all worktrees."""
+    cwd = Path(cwd).resolve()
+    common_dir = _git_common_dir(cwd)
+    if common_dir is not None:
+        locator = common_dir / CONTEXT_LOCATOR
+        if not locator.exists():
+            local = _local_context_root(cwd)
+            if local is not None and local.parent == _git_anchor(cwd, common_dir):
+                return local
+        return _read_git_locator(cwd, common_dir)
+    local = _local_context_root(cwd)
+    if local is None:
+        raise ContextRootError(f"context root not found from {cwd}")
+    return local
+
+
+def context_root_for_bootstrap(cwd: Path) -> Path:
+    """Choose the canonical target before its locator exists."""
+    cwd = Path(cwd).resolve()
+    common_dir = _git_common_dir(cwd)
+    if common_dir is None:
+        return cwd / "context"
+    locator = common_dir / CONTEXT_LOCATOR
+    if locator.exists():
+        return _read_git_locator(cwd, common_dir)
+    return _git_anchor(cwd, common_dir) / "context"
+
+
+def write_context_locator(cwd: Path, context_root: Path) -> None:
+    """Atomically register an initialized Git context root."""
+    cwd = Path(cwd).resolve()
+    common_dir = _git_common_dir(cwd)
+    if common_dir is None:
+        return
+    anchor = _git_anchor(cwd, common_dir)
+    context_root = Path(context_root).resolve()
+    try:
+        context_root.relative_to(anchor)
+    except ValueError as exc:
+        raise ContextRootError(f"context root is outside registered root: {context_root}") from exc
+    if not (context_root / "index.html").is_file():
+        raise ContextRootError(f"context root is missing index.html: {context_root}")
+    data = {
+        "version": CONTEXT_LOCATOR_VERSION,
+        "path": str(context_root),
+        "anchor": str(anchor),
+        "identity": _repository_identity(common_dir, anchor),
+    }
+    locator = common_dir / CONTEXT_LOCATOR
+    temporary = locator.with_name(f".{locator.name}.tmp.{os.getpid()}")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, locator)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 DEFAULT_PERMISSION_PROFILES = {
     "orchestrator": {
         "acquire_lock": True,
@@ -64,11 +225,11 @@ def today_utc() -> str:
 
 def find_context_root() -> Path | None:
     cwd = Path.cwd()
-    for parent in [cwd] + list(cwd.parents):
-        if (parent / "context" / "index.html").exists():
-            return parent / "context"
-    if (cwd / "index.html").exists():
-        return cwd
+    if _git_common_dir(cwd) is not None:
+        return canonical_context_root(cwd)
+    local = _local_context_root(cwd)
+    if local is not None:
+        return local
     for parent in Path(__file__).resolve().parents:
         if (parent / "index.html").exists():
             return parent

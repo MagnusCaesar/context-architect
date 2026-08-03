@@ -29,7 +29,15 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from context_utils import generate_history, resolve_context_page, today_utc, write_atomic
+from context_utils import (
+    ContextRootError,
+    context_root_for_bootstrap,
+    generate_history,
+    resolve_context_page,
+    today_utc,
+    write_atomic,
+    write_context_locator,
+)
 
 
 SKILL_ROOT = Path(__file__).parent.parent
@@ -542,7 +550,7 @@ def refresh_context(target: Path) -> dict:
     (index.html, decisions/, failure-todos/, open-questions/, ledger) or existing
     config values. Runs validate.py and returns a structured report.
     """
-    context_dir = target / "context"
+    context_dir = context_root_for_bootstrap(target)
     if not (context_dir / "index.html").exists():
         return {"status": "error", "error": f"{context_dir}/index.html not found — not a context-arch dir; run full bootstrap first"}
 
@@ -662,6 +670,7 @@ def refresh_context(target: Path) -> dict:
     else:
         validate_passed = None
 
+    write_context_locator(target, context_dir)
     return {
         "status": "refreshed",
         "target": str(target),
@@ -746,7 +755,7 @@ def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> 
 def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str = "project"):
     """Generate the full context/ directory structure."""
     pages = normalize_pages(pages)
-    context_dir = target / "context"
+    context_dir = context_root_for_bootstrap(target)
     context_dir.mkdir(exist_ok=True)
     (context_dir / "scripts").mkdir(exist_ok=True)
     (context_dir / "hooks").mkdir(exist_ok=True)
@@ -1436,6 +1445,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     install_bootloaders(target)
     install_platform_hooks(target, scope=scope)
     generate_history(context_dir)
+    write_context_locator(target, context_dir)
     return context_dir
 
 
@@ -1460,7 +1470,11 @@ def main():
 
     # Refresh mode: update machinery only, never touch authored content
     if args.refresh:
-        report = refresh_context(target)
+        try:
+            report = refresh_context(target)
+        except ContextRootError as e:
+            print(json.dumps({"status": "error", "error": str(e)}))
+            sys.exit(1)
         if report.get("status") == "error":
             print(json.dumps(report, indent=2))
             sys.exit(1)
@@ -1510,7 +1524,7 @@ def main():
     try:
         context_dir = generate_skeleton(target, pages, config=config, scope=args.scope)
         imported = absorb_docs(target, context_dir, findings, today_utc()) if args.absorb_docs else []
-    except ValueError as e:
+    except (ValueError, ContextRootError) as e:
         print(json.dumps({"status": "error", "error": str(e)}))
         sys.exit(1)
     print(f"Generated context/ at {context_dir}")
