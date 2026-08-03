@@ -111,15 +111,38 @@ process = subprocess.Popen(sys.argv[2:], start_new_session=True)
 try:
     raise SystemExit(process.wait(timeout=seconds))
 except subprocess.TimeoutExpired:
-    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
+        pass
+    try:
         os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+    except ProcessLookupError:
+        pass
+    process.wait()
     raise SystemExit(124)
 PY
 chmod +x "$PROJECT/run-with-timeout.py"
+
+cat >"$PROJECT/timeout-tree.py" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+
+marker = sys.argv[1]
+level = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if level < 2:
+    subprocess.Popen([sys.executable, __file__, marker, str(level + 1)])
+time.sleep(1)
+open(marker, "w").close()
+PY
 
 printf '%s\n' '{"type":"turn.completed"}' 'not-json' \
   | if python3 "$PROJECT/sanitize-codex-stream.py" "$TMP/invalid-stream.json"; then
@@ -251,6 +274,27 @@ assert before == after
 print("deterministic hook adversaries: PASS")
 PY
 
+if ! command -v bwrap >/dev/null 2>&1; then
+  echo "timeout descendant cleanup: SKIP (bubblewrap unavailable)"
+else
+  RUNTIME_BINDS=()
+  for source in /usr /bin /lib /lib64 /etc/alternatives /etc/crypto-policies /etc/pki /etc/ssl /etc/resolv.conf /etc/hosts /etc/nsswitch.conf /etc/passwd /etc/group; do
+    [ ! -e "$source" ] || RUNTIME_BINDS+=(--ro-bind "$source" "$source")
+  done
+  TREE_LIVE=(bwrap --die-with-parent "${RUNTIME_BINDS[@]}"
+             --proc /proc --dev /dev --dir /tmp --bind "$TMP" "$TMP" --chdir "$PROJECT")
+  TREE_MARKER="$TMP/timeout-tree-survived"
+  set +e
+  "$PYTHON_BIN" "$PROJECT/run-with-timeout.py" 0.1 \
+    "${TREE_LIVE[@]}" /usr/bin/python3 "$PROJECT/timeout-tree.py" "$TREE_MARKER"
+  TREE_STATUS=$?
+  set -e
+  [ "$TREE_STATUS" -eq 124 ]
+  sleep 1.1
+  [ ! -e "$TREE_MARKER" ]
+  echo "timeout descendant cleanup: PASS"
+fi
+
 if [ "${CONTARCH_LIVE_CODEX:-1}" = 0 ]; then
   echo "live Codex hooks: SKIP (CONTARCH_LIVE_CODEX=0)"
   exit 0
@@ -259,7 +303,6 @@ if ! command -v codex >/dev/null 2>&1; then
   echo "live Codex hooks: SKIP (codex executable unavailable)"
   exit 0
 fi
-
 if ! command -v bwrap >/dev/null 2>&1; then
   echo "live Codex hooks: SKIP (bubblewrap unavailable; host data remains hidden)"
   exit 0
@@ -286,11 +329,7 @@ case "$CODEX_ENTRY" in
   */bin/codex.js) CODEX_SCOPE=${CODEX_ENTRY%/codex/bin/codex.js} ;;
   *) echo "live Codex hooks: SKIP (unrecognized Codex installation; host data remains hidden)"; exit 0 ;;
 esac
-RUNTIME_BINDS=()
-for source in /usr /bin /lib /lib64 /etc/alternatives /etc/crypto-policies /etc/pki /etc/ssl /etc/resolv.conf /etc/hosts /etc/nsswitch.conf /etc/passwd /etc/group; do
-  [ ! -e "$source" ] || RUNTIME_BINDS+=(--ro-bind "$source" "$source")
-done
-LIVE=(bwrap --die-with-parent --new-session "${RUNTIME_BINDS[@]}"
+LIVE=(bwrap --die-with-parent "${RUNTIME_BINDS[@]}"
       --ro-bind "$NODE_BIN" "$NODE_BIN" --ro-bind "$CODEX_SCOPE" "$CODEX_SCOPE"
       --proc /proc --dev /dev --dir /tmp --bind "$TMP" "$TMP" "${AUTH_BIND[@]}"
       --setenv HOME "$HOME" --setenv CODEX_HOME "$STATE" --chdir "$PROJECT")
