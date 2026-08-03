@@ -82,6 +82,15 @@ def test_malformed_or_missing_payload_is_a_safe_empty_event():
     assert normalize_event("PreToolUse", {}).tool == ""
 
 
+@pytest.mark.parametrize("tool_input", [None, {}, "not-an-object"])
+def test_malformed_edit_payload_fails_closed(tmp_path, tool_input):
+    event = normalize_event("PreToolUse", {"tool_name": "Write", "tool_input": tool_input})
+    result = dispatch(event, tmp_path)
+
+    assert not result.allow
+    assert "valid path" in result.reason
+
+
 def test_pretool_block_uses_codex_permission_decision():
     result = render_codex_result(block("read context first"), "PreToolUse")
     assert result == {

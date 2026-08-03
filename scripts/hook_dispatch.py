@@ -418,6 +418,8 @@ def _lock_gate(path: Path, event: Event, context_root: Path) -> Result:
 def _edit_gate(event: Event, context_root: Path) -> Result:
     if event.unsafe_paths:
         return block("edit paths must stay inside the project or canonical context")
+    if event.tool in {"Edit", "Write", "apply_patch"} and not event.paths:
+        return block("edit payload must include at least one valid path")
     missing = []
     relevant = []
     for raw_path in event.paths:

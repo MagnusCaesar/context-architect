@@ -12,6 +12,10 @@ This page records Codex facts and evidence boundaries. Behavioral schemas remain
 | Hook schemas | Repository Claude/Codex fixtures plus local project-hook probe |
 | Subagents | Separate conversation threads; shared cwd and shared filesystem |
 
+The 2026-08-02 fresh gate reconfirmed `codex-cli 0.146.0` and the required
+`exec` flags: `--ephemeral`, `--dangerously-bypass-hook-trust`, `--sandbox
+workspace-write`, `--json`, and `--color never`.
+
 Official watch sources: [Codex changelog](https://developers.openai.com/codex/changelog/), [hooks](https://developers.openai.com/codex/hooks/), [subagents](https://developers.openai.com/codex/subagents/), [AGENTS.md](https://developers.openai.com/codex/guides/agents-md/), and [app server](https://developers.openai.com/codex/app-server/).
 
 ## Hooks and subagents
@@ -19,6 +23,21 @@ Official watch sources: [Codex changelog](https://developers.openai.com/codex/ch
 The dispatcher normalizes supported lifecycle inputs for `UserPromptSubmit`, `PreCompact`, `PostCompact`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, and `SessionEnd`; Claude also installs `SessionStart`. Generated project configuration is merged by managed identity, preserving unrelated user/plugin hooks and their order.
 
 A local 2026-08-02 probe observed project hooks on subagent lifecycle and child tool calls, including `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, and `PostToolUse`. Stop completion was inconclusive after timeout. Treat those observations as a dated probe, not a permanent upstream guarantee.
+
+| Event | Earlier local probe | Fresh isolated E2E |
+|---|---|---|
+| `SessionStart` | observed | inconclusive: run stopped at authentication |
+| `UserPromptSubmit` | observed | inconclusive: run stopped at authentication |
+| `SubagentStart` / `SubagentStop` | observed | inconclusive: no model turn ran |
+| parent/child `PreToolUse` / `PostToolUse` | observed | inconclusive: no model turn ran |
+| `Stop` / `SessionEnd` | not captured in bounded run | inconclusive |
+
+The fresh harness used temporary project hooks and temporary writable
+`CODEX_HOME`; host `auth.json` and `config.toml` were mounted read-only and not
+copied. Both API-key environment variables were absent, and the isolated run
+was rejected by the Responses websocket with HTTP 401. Writable `~/.codex` was
+not used. The harness parses only stream event names and hook schema keys, and
+requires one `turn.completed`; an exit-zero error stream cannot pass.
 
 Subagent context isolation means a separate conversation thread, not a separate machine or checkout. Subagents still receive applicable system/project instructions. They share cwd and filesystem unless the orchestrator deliberately assigns a worktree. Therefore:
 
@@ -51,12 +70,22 @@ For Codex projects, that explicit refresh queries the catalog. A role changes on
 
 Automated fixtures verify event normalization, managed config merge, edit/lock gates, bounded diagnostics, capsule privacy, Firstmate privacy, model pagination/fallback/rollback, and platform-specific bootstrap. Real linked-worktree tests verify canonical shared state and copied/malformed locator rejection.
 
+Fresh 2026-08-02 results: `231` pytest tests passed; `101` smoke checks passed;
+all Python scripts compiled; `7` shell hook/test/script files passed `bash -n`;
+the linked-worktree lifecycle E2E passed; and deterministic hook adversaries
+passed. Those adversaries cover unrelated-hook preservation, multi-file
+unowned-path denial, malformed-edit fail-closed behavior, bounded diagnostic
+spill, one-time child continuation on validation failure, bounded capsule
+privacy, corrupt-catalog rollback, and the generated Luna-to-Terra/low fallback.
+Manual Claude Code E2E was outside this Codex-only gate and was not run.
+
 Not verified as a durable guarantee:
 
 - Future Codex hook names or payload fields not present in fixtures.
 - Hook inheritance behavior after later CLI releases.
 - Direct Luna override support after later model releases.
+- Actual economy child execution in the fresh E2E; isolated authentication failed before a model turn, so only generated-profile fallback was verified.
 - Remote sandbox, MCP/plugin, IDE, or wrapper-specific policies.
-- The timed-out Stop probe; rerun live E2E before a release claim.
+- `Stop` and `SessionEnd` in a completed live run.
 
 When upstream changes, add/update a failing fixture first, adapt the normalizer or model policy once, then update this dated baseline. Do not auto-update behavior during ordinary sessions.
