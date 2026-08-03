@@ -1,6 +1,6 @@
 # Context Architecture Contracts
 
-Codex version, hook/subagent observations, model availability, and known gaps are tracked in [compatibility](compatibility.md); this file remains the harness-neutral behavioral authority.
+Codex version, hook/subagent observations, model availability, and known gaps are tracked in [Codex compatibility](codex-compatibility.md); this file remains the harness-neutral behavioral authority.
 
 This file defines script-owned contracts for the lean V1 context architecture.
 Scripts report facts and enforce structure. The orchestrator resolves judgment:
@@ -283,6 +283,28 @@ ranges, heads, short rationale, and links to affected context nodes.
 Individual nodes may carry `commits` metadata when a commit directly
 implements, updates, resolves, or authorizes that node. Unrecognized commits
 produce handoff JSON for orchestrator delegation; scripts do not spawn agents.
+
+## Release Contract
+
+`package.sh <exact-tag>` accepts one filename-safe exact tag and publishes one
+transactional version directory: `dist/contarch-<tag>/`. That directory contains
+the self-extractor, matching `.tar.gz`, and `.sha256` manifest. The destination
+must not already exist and publication must be an atomic, same-filesystem,
+no-clobber rename; any failure leaves no partial release and never overwrites an
+existing release.
+
+Before verification, packaging requires a clean tracked/untracked status, pins
+the current HEAD commit, proves the tag resolves to that exact commit, and finds
+the exact tag heading in `CHANGELOG.md`. `scripts/release-verify.sh` is the
+canonical executable gate. After it returns, packaging again proves clean
+status, unchanged HEAD, and unchanged tag resolution. The payload is always
+`git archive <pinned-commit>`, never a mutable tag or working-tree file list.
+
+The verifier runs Python tests, smoke, automated shell tests, Python/shell
+syntax, documentation structure, and diff checks. Post-build gates reject
+unsafe tar members, mismatched self-extractor payload/version metadata, failed
+Claude/Codex/both dry runs, and checksum mismatch. Manual live harness E2E is a
+separate explicit release gate.
 
 ## Memory Boundary
 

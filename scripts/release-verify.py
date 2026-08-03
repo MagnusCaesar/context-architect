@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_DOC_TERMS = {
     "README.md": ("Feature", "Claude Code", "Codex", "Verified", "Not verified"),
     "CHANGELOG.md": ("## [Unreleased]", "contarch-15d5dd0"),
-    "docs/compatibility.md": (
+    "docs/codex-compatibility.md": (
         "0.146.0", "2026-08-02", "SubagentStart", "shared filesystem",
         "separate conversation", "explicit refresh", "gpt-5.6-luna",
     ),
@@ -42,8 +42,11 @@ def verify_docs() -> None:
         if missing:
             raise VerificationError(f"{name} missing: {', '.join(missing)}")
     contracts = (ROOT / "docs/contracts.md").read_text()
-    if "compatibility.md" not in contracts:
+    if "codex-compatibility.md" not in contracts:
         raise VerificationError("docs/contracts.md must link to Codex compatibility facts")
+    for term in ("## Release Contract", "exact tag", "clean", "HEAD", "git archive", "transactional"):
+        if term not in contracts:
+            raise VerificationError(f"docs/contracts.md missing release gate: {term}")
 
 
 def safe_members(archive: Path) -> None:
@@ -82,7 +85,7 @@ def verify_repository() -> None:
         run(["bash", str(test.relative_to(ROOT))])
     for script in sorted((ROOT / "scripts").glob("*.py")):
         compile(script.read_bytes(), str(script.relative_to(ROOT)), "exec")
-    for script in sorted({ROOT / "package.sh", ROOT / "installer-header.sh", ROOT / "smoke.sh", *(ROOT / "hooks").glob("*"), *(ROOT / "tests").glob("*.sh")}):
+    for script in sorted({ROOT / "package.sh", ROOT / "installer-header.sh", ROOT / "smoke.sh", *(ROOT / "scripts").glob("*.sh"), *(ROOT / "hooks").glob("*"), *(ROOT / "tests").glob("*.sh")}):
         if script.is_file() and (script.suffix == ".sh" or script.parent.name == "hooks"):
             run(["bash", "-n", str(script.relative_to(ROOT))])
     run(["git", "diff", "--check"])

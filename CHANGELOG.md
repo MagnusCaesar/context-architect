@@ -23,4 +23,4 @@ All notable changes are recorded here. Release headings use exact Git tags so `p
 ### Verification
 
 - Added adversarial fixtures for malformed hook payloads, unsafe paths, graph cycles/orphans, stale receipts, worktree locator tampering, model-catalog pagination/conflicts, partial-write rollback, and release failures.
-- Live harness probes remain a dated, explicit gate; see `docs/compatibility.md`.
+- Live harness probes remain a dated, explicit gate; see `docs/codex-compatibility.md`.

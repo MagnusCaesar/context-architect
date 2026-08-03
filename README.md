@@ -49,7 +49,7 @@ python3 scripts/bootstrap.py --target /path/to/project --platform both
 | Semantic lead/balanced/economy model policy | Native Claude choice unchanged | Sol/Terra/Luna policy | Verified: catalog, fallback, conflict, rollback fixtures |
 | Tagged self-extractor for one or both harnesses | Yes | Yes | Verified: clean-tag, payload, archive, checksum tests |
 
-Verified means automated repository tests unless the compatibility page labels a dated local CLI probe. Not verified: every future Codex/Claude release, every plugin combination, remote sandbox policy, and third-party wrapper behavior. See [compatibility](docs/compatibility.md) for exact evidence and gaps; [contracts](docs/contracts.md) remain behavioral authority.
+Verified means automated repository tests unless the compatibility page labels a dated local CLI probe. Not verified: every future Codex/Claude release, every plugin combination, remote sandbox policy, and third-party wrapper behavior. See [Codex compatibility](docs/codex-compatibility.md) for exact evidence and gaps; [contracts](docs/contracts.md) remain behavioral authority.
 
 ## What bootstrap creates
 
@@ -87,7 +87,7 @@ Codex roles default to:
 | balanced (Sonnet-equivalent) | `gpt-5.6-terra` | medium | Terra/medium |
 | economy (Haiku-equivalent) | `gpt-5.6-luna` | medium | Terra/low when direct Luna override is rejected; profile discloses both |
 
-Model discovery is fail-closed and changes only during explicit Codex `--refresh`. See [compatibility](docs/compatibility.md).
+Model discovery is fail-closed and changes only during explicit Codex `--refresh`. See [Codex compatibility](docs/codex-compatibility.md).
 
 ## Development
 
@@ -99,17 +99,17 @@ python3 scripts/bootstrap.py --target /path/to/project --absorb-docs --platform 
 python3 scripts/bootstrap.py --target /path/to/project --refresh
 python3 -m pytest -q
 bash smoke.sh
-python3 scripts/release-verify.py
+scripts/release-verify.sh
 ```
 
 Target-repo lifecycle commands live in generated bootloaders and [contracts](docs/contracts.md). HTML under `context/` is authoritative; Markdown under `docs/context/` is generated. Context-mode is recommended for low-context command/file/web processing, but semantic search never replaces deterministic graph validation.
 
-Build a release only after adding an exact changelog heading, committing it, and tagging that commit:
+Release packaging publishes one verified version directory:
 
 ```bash
-./package.sh vX.Y.Z
+./package.sh <exact-tag>
 ```
 
-Packaging rejects dirty/untracked trees and tags not exactly at `HEAD`; payload comes only from `git archive <tag>`.
+See the [release contract](docs/contracts.md#release-contract) for authoritative gates and artifact layout.
 
 `context-architecture-replication-report-2026-06-05.md` is historical exploration, not current authority.

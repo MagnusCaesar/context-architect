@@ -33,21 +33,39 @@ def git(repo, *args):
 
 def init_release_repo(tmp_path):
     repo = tmp_path / "release"
-    (repo / "scripts").mkdir(parents=True)
-    shutil.copy2(SOURCE / "package.sh", repo / "package.sh")
-    shutil.copy2(SOURCE / "installer-header.sh", repo / "installer-header.sh")
-    (repo / "scripts" / "release-verify.py").write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, sys\n"
-        "raise SystemExit(17 if os.environ.get('FAIL_VERIFY') else 0)\n"
-    )
-    (repo / "README.md").write_text("# fixture\n")
-    (repo / ".gitignore").write_text("dist/\n")
-    (repo / "CHANGELOG.md").write_text(f"# Changelog\n\n## [{TAG}] - 2026-08-02\n\n- Fixture.\n")
-    (repo / "payload.txt").write_text("tracked payload\n")
+    repo.mkdir()
     git(repo, "init", "-q")
     git(repo, "config", "user.name", "Release Test")
     git(repo, "config", "user.email", "release@example.invalid")
+    (repo / ".gitignore").write_text("dist/\n")
+    (repo / "base.txt").write_text("base\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy2(SOURCE / "package.sh", repo / "package.sh")
+    shutil.copy2(SOURCE / "installer-header.sh", repo / "installer-header.sh")
+    verifier = SOURCE / "scripts" / "release-verify.sh"
+    if verifier.exists():
+        shutil.copy2(verifier, repo / "scripts" / "release-verify.sh")
+    else:
+        (repo / "scripts" / "release-verify.sh").write_text("#!/usr/bin/env bash\nexec python3 scripts/release-verify.py \"$@\"\n")
+        (repo / "scripts" / "release-verify.sh").chmod(0o755)
+    (repo / "scripts" / "release-verify.py").write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, subprocess, sys\n"
+        "marker = os.environ.get('VERIFY_MARKER')\n"
+        "if marker: pathlib.Path(marker).write_text('called')\n"
+        "if os.environ.get('MUTATE_HEAD'):\n"
+        "    pathlib.Path('payload.txt').write_text('verifier mutation\\n')\n"
+        "    subprocess.run(['git', 'add', 'payload.txt'], check=True)\n"
+        "    subprocess.run(['git', 'commit', '-q', '-m', 'verifier mutation'], check=True)\n"
+        "if os.environ.get('MOVE_TAG'):\n"
+        f"    subprocess.run(['git', 'tag', '-f', '{TAG}', 'HEAD^'], check=True, stdout=subprocess.DEVNULL)\n"
+        "raise SystemExit(17 if os.environ.get('FAIL_VERIFY') else 0)\n"
+    )
+    (repo / "README.md").write_text("# fixture\n")
+    (repo / "CHANGELOG.md").write_text(f"# Changelog\n\n## [{TAG}] - 2026-08-02\n\n- Fixture.\n")
+    (repo / "payload.txt").write_text("tracked payload\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "fixture")
     git(repo, "tag", TAG)
@@ -64,12 +82,12 @@ def retag_head(repo):
 
 
 def artifacts(repo, tag=TAG):
-    stem = repo / "dist" / f"contarch-{tag}"
+    stem = repo / "dist" / f"contarch-{tag}" / f"contarch-{tag}"
     return Path(f"{stem}.sh"), Path(f"{stem}.tar.gz"), Path(f"{stem}.sha256")
 
 
 def assert_no_completed_artifacts(repo, tag=TAG):
-    assert not any(path.exists() for path in artifacts(repo, tag))
+    assert not (repo / "dist" / f"contarch-{tag}").exists()
 
 
 @pytest.mark.parametrize("change", ["tracked", "untracked"])
@@ -150,11 +168,81 @@ def test_exact_tag_package_is_tracked_reproducible_and_self_consistent(tmp_path)
     actual = {line.split()[1]: line.split()[0] for line in checksums.read_text().splitlines()}
     assert actual == expected
 
+    shutil.rmtree(installer.parent)
     assert package(repo).returncode == 0
     assert {
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in (installer, archive)
     } == expected
+
+
+@pytest.mark.parametrize("mutation, message", [
+    ({"MUTATE_HEAD": "1"}, "head"),
+    ({"MOVE_TAG": "1"}, "tag"),
+])
+def test_verifier_cannot_race_pinned_head_or_tag(tmp_path, mutation, message):
+    repo = init_release_repo(tmp_path)
+    pinned = git(repo, "rev-parse", "HEAD")
+
+    completed = package(repo, **mutation)
+
+    assert completed.returncode != 0
+    assert message in completed.stderr.lower()
+    assert_no_completed_artifacts(repo)
+    assert pinned != git(repo, "rev-parse", "HEAD") or mutation.get("MOVE_TAG")
+
+
+def test_preexisting_release_directory_fails_before_verifier_without_clobber(tmp_path):
+    repo = init_release_repo(tmp_path)
+    destination = repo / "dist" / f"contarch-{TAG}"
+    destination.mkdir(parents=True)
+    sentinel = destination / "sentinel"
+    sentinel.write_bytes(b"old release")
+    marker = tmp_path / "verifier-called"
+
+    completed = package(repo, VERIFY_MARKER=str(marker))
+
+    assert completed.returncode != 0
+    assert "exists" in completed.stderr.lower()
+    assert sentinel.read_bytes() == b"old release"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("collision", [False, True])
+def test_publication_failure_never_leaves_a_partial_release(tmp_path, collision):
+    repo = init_release_repo(tmp_path)
+    destination = repo / "dist" / f"contarch-{TAG}"
+    wrappers = tmp_path / "bin"
+    wrappers.mkdir()
+    real_mv = shutil.which("mv")
+    wrapper = wrappers / "mv"
+    if collision:
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            "dest=${@: -1}\n"
+            "mkdir -p \"$dest\"\n"
+            "printf old > \"$dest/sentinel\"\n"
+            f"exec {real_mv} \"$@\"\n"
+        )
+    else:
+        wrapper.write_text("#!/usr/bin/env bash\nexit 23\n")
+    wrapper.chmod(0o755)
+
+    completed = package(repo, PATH=f"{wrappers}:{os.environ['PATH']}")
+
+    assert completed.returncode != 0
+    if collision:
+        assert (destination / "sentinel").read_bytes() == b"old"
+        assert not any(path.name.startswith("contarch-") for path in destination.iterdir())
+    else:
+        assert not destination.exists()
+
+
+def test_canonical_shell_verifier_is_executable_and_package_uses_it():
+    verifier = SOURCE / "scripts" / "release-verify.sh"
+    assert verifier.is_file() and os.access(verifier, os.X_OK)
+    assert "release-verify.sh" in (SOURCE / "package.sh").read_text()
+    assert "release-verify.py" in verifier.read_text()
 
 
 def test_artifact_verifier_rejects_unsafe_tar_member(tmp_path):
@@ -165,7 +253,7 @@ def test_artifact_verifier_rejects_unsafe_tar_member(tmp_path):
         payload.addfile(member, io.BytesIO(b"x"))
 
     completed = run(
-        [sys.executable, str(SOURCE / "scripts" / "release-verify.py"), "--archive", str(archive)],
+        ["bash", str(SOURCE / "scripts" / "release-verify.sh"), "--archive", str(archive)],
         SOURCE,
     )
 
@@ -197,7 +285,9 @@ def test_artifact_verifier_rejects_payload_or_version_mismatch(tmp_path):
 
 def test_release_documentation_has_truth_boundaries_and_feature_matrix():
     readme = (SOURCE / "README.md").read_text()
-    compatibility = (SOURCE / "docs" / "compatibility.md").read_text()
+    compatibility = (SOURCE / "docs" / "codex-compatibility.md").read_text()
+    summary = (SOURCE / "docs" / "compatibility.md").read_text()
+    contracts = (SOURCE / "docs" / "contracts.md").read_text()
     changelog = (SOURCE / "CHANGELOG.md").read_text()
 
     for term in ("Feature", "Claude Code", "Codex", "Verified", "Not verified"):
@@ -207,3 +297,6 @@ def test_release_documentation_has_truth_boundaries_and_feature_matrix():
         assert term in compatibility
     assert "## [Unreleased]" in changelog
     assert "contarch-15d5dd0" in changelog
+    assert "codex-compatibility.md" in summary
+    for gate in ("exact tag", "clean", "HEAD", "git archive", "transactional"):
+        assert gate in contracts
