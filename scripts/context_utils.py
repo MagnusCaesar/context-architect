@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import html
 import json
 import os
@@ -745,9 +746,40 @@ def rotate_ledger_events(context_root: Path) -> dict:
     return {"rotated": rotated, "kept": len(keep)}
 
 
+def generate_history(context_root: Path, nodes=None) -> bool:
+    """Regenerate the generated history list without touching authored nodes."""
+    from knowledge_graph import load_nodes, render_history
+
+    history = context_root / "history.html"
+    if not history.exists():
+        return False
+    rows = render_history(nodes if nodes is not None else load_nodes(context_root))
+    with context_mutex(context_root, "history"):
+        content = history.read_text(errors="replace")
+        new_content, count = re.subn(
+            r'(<section\b[^>]*\bid=["\']history["\'][^>]*>.*?<ul\b[^>]*>)(.*?)(</ul>)',
+            lambda match: f"{match.group(1)}{rows}{match.group(3)}",
+            content,
+            count=1,
+            flags=re.I | re.S,
+        )
+        if count == 0 or new_content == content:
+            return False
+        write_atomic(history, new_content, context_root=context_root)
+    return True
+
+
 def run_daily_hygiene(context_root: Path, append_event: bool = True) -> dict:
     if daily_hygiene_ran_today(context_root):
         return {"status": "skipped", "reason": "already_ran_today"}
+    from knowledge_graph import consolidation_candidates, load_nodes
+
+    nodes = load_nodes(context_root)
+    candidates = consolidation_candidates(nodes)
+    candidate_payload = json.dumps(candidates, sort_keys=True, separators=(",", ":"))
+    signature = hashlib.sha256(candidate_payload.encode()).hexdigest()
+    candidate_ids = sorted({node_id for candidate in candidates for node_id in candidate["node_ids"]})
+    history_changed = generate_history(context_root, nodes)
     rotation = rotate_ledger_events(context_root)
     result = check_reachability(context_root)
     broken = len(result.get("broken_links", []))
@@ -758,9 +790,16 @@ def run_daily_hygiene(context_root: Path, append_event: bool = True) -> dict:
         status = "critical"
     elif orphans or fallback:
         status = "warning"
-    details = f"orphans={orphans} broken_links={broken} fallback_root={str(fallback).lower()} rotated={rotation.get('rotated', 0)}"
+    details = (
+        f"orphans={orphans} broken_links={broken} fallback_root={str(fallback).lower()} "
+        f"rotated={rotation.get('rotated', 0)} consolidation_candidates={len(candidates)}"
+    )
     if append_event:
-        extra = {}
+        extra = {
+            "consolidation_count": str(len(candidates)),
+            "consolidation_node_ids": ",".join(candidate_ids),
+            "consolidation_signature": signature,
+        }
         if result.get("handoff_request"):
             extra["handoff"] = "context_hygiene_request"
         append_ledger_event(
@@ -773,7 +812,13 @@ def run_daily_hygiene(context_root: Path, append_event: bool = True) -> dict:
             extra_attrs=extra,
             trigger_hygiene=False,
         )
-    return {"status": status, "reachability": result, "rotation": rotation}
+    return {
+        "status": status,
+        "reachability": result,
+        "rotation": rotation,
+        "history_changed": history_changed,
+        "consolidation_candidates": candidates,
+    }
 
 
 def maybe_run_daily_hygiene(context_root: Path) -> None:

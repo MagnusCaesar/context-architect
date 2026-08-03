@@ -29,7 +29,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from context_utils import resolve_context_page, today_utc, write_atomic
+from context_utils import generate_history, resolve_context_page, today_utc, write_atomic
 
 
 SKILL_ROOT = Path(__file__).parent.parent
@@ -1435,6 +1435,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
 
     install_bootloaders(target)
     install_platform_hooks(target, scope=scope)
+    generate_history(context_dir)
     return context_dir
 
 

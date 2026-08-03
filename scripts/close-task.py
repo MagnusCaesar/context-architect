@@ -13,6 +13,7 @@ from context_utils import (
     append_ledger_event,
     context_mutex,
     find_context_root,
+    generate_history,
     has_permission,
     MutexTimeout,
     now_utc,
@@ -195,6 +196,8 @@ def main():
     lock_result = release_lock(context_root, page, args.agent_id)
 
     docs_result = {"ran": False, "reason": "skipped"}
+    if lock_result.get("released"):
+        generate_history(context_root)
     if lock_result.get("released") and not args.skip_docs:
         docs_result = run_generate_docs(context_root)
 

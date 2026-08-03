@@ -13,6 +13,8 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
+from context_utils import generate_history
+
 
 class HTMLToMarkdown(HTMLParser):
     def __init__(self):
@@ -201,6 +203,7 @@ def main():
 
     docs_dir = context_dir.parent / "docs" / "context"
     docs_dir.mkdir(parents=True, exist_ok=True)
+    generate_history(context_dir)
 
     html_files = sorted(context_dir.rglob("*.html"))
     converted = 0

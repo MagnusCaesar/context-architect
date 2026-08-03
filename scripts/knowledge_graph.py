@@ -2,8 +2,10 @@
 
 from dataclasses import dataclass
 from collections import deque
+from datetime import datetime, timezone
 import html
 from pathlib import Path
+import posixpath
 import re
 
 
@@ -12,6 +14,13 @@ STATUSES = {
     "decision": {"proposed", "accepted", "implemented", "superseded", "deprecated", "rejected"},
     "failure": {"open", "authorized", "blocked", "resolved", "deprecated"},
     "work": {"backlog", "active", "blocked", "done", "cancelled"},
+}
+
+TERMINAL_STATUSES = {
+    "wiki": {"superseded", "deprecated"},
+    "decision": {"superseded", "deprecated", "rejected"},
+    "failure": {"resolved", "deprecated"},
+    "work": {"done", "cancelled"},
 }
 
 PATH_KINDS = {
@@ -50,6 +59,9 @@ class Node:
     tracks: tuple[str, ...]
     affects: tuple[str, ...]
     statement: str
+    archived_at: str = ""
+    topic: str = ""
+    source_owner: str = ""
 
 
 def _attrs(raw: str) -> dict[str, str]:
@@ -168,12 +180,80 @@ def load_nodes(context_root: Path) -> list[Node]:
                 tracks=_values(_field(attrs, meta, body, "tracks")),
                 affects=_values(_field(attrs, meta, body, "affects")),
                 statement=statement,
+                archived_at=_field(attrs, meta, body, "archived-at"),
+                topic=_field(attrs, meta, body, "topic"),
+                source_owner=_field(attrs, meta, body, "source-owner"),
             ))
     return nodes
 
 
 def heads(nodes: list[Node], kind: str) -> list[Node]:
     return [node for node in nodes if node.kind == kind and node.parent is None]
+
+
+def _parse_timestamp(raw: str) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _relative_node_path(path: Path) -> str:
+    for index in range(len(path.parts) - 2, -1, -1):
+        if path.parts[index] in PATH_KINDS:
+            return Path(*path.parts[index:]).as_posix()
+    return path.name
+
+
+def render_history(nodes: list[Node]) -> str:
+    """Render a concise chronological link index for archived terminal nodes."""
+    historical = [
+        node for node in nodes
+        if node.archived
+        and node.status in TERMINAL_STATUSES.get(node.kind, set())
+        and _parse_timestamp(node.archived_at) is not None
+    ]
+    historical.sort(key=lambda node: (_parse_timestamp(node.archived_at), node.node_id))
+    return "".join(
+        f'<li data-node-id="{html.escape(node.node_id, quote=True)}">'
+        f'<time datetime="{html.escape(node.archived_at, quote=True)}">{html.escape(node.archived_at)}</time> '
+        f'<a href="{html.escape(_relative_node_path(node.path), quote=True)}#{html.escape(node.node_id, quote=True)}">'
+        f'{html.escape(node.node_id)}</a> {html.escape(node.kind)} {html.escape(node.status)}</li>\n'
+        for node in historical
+    )
+
+
+def _normalized_basis(prefix: str, value: str) -> str:
+    value = " ".join(value.split())
+    if prefix in {"affects", "source-owner"}:
+        slash_terminated = prefix == "source-owner" and value.replace("\\", "/").endswith("/")
+        value = posixpath.normpath(value.replace("\\", "/"))
+        if slash_terminated and value != ".":
+            value += "/"
+    return f"{prefix}:{value}" if value and value != "." else ""
+
+
+def consolidation_candidates(nodes: list[Node]) -> tuple[dict, ...]:
+    """Suggest exact shared bases for three or more live heads; never mutate nodes."""
+    groups: dict[tuple[str, str], set[str]] = {}
+    for node in nodes:
+        if node.archived or node.parent or node.status in TERMINAL_STATUSES.get(node.kind, set()):
+            continue
+        bases = {_normalized_basis("affects", value) for value in node.affects}
+        bases.add(_normalized_basis("topic", node.topic))
+        bases.add(_normalized_basis("source-owner", node.source_owner))
+        for basis in bases - {""}:
+            groups.setdefault((node.kind, basis), set()).add(node.node_id)
+    return tuple(
+        {"basis": basis, "node_ids": tuple(sorted(node_ids))}
+        for (_kind, basis), node_ids in sorted(groups.items())
+        if len(node_ids) >= 3
+    )
 
 
 def _href_paths(context_root: Path, page: Path) -> list[Path]:
@@ -262,6 +342,9 @@ def validate_graphs(context_root: Path, nodes: list[Node]) -> list[str]:
             errors.append((node.path, f"invalid {node.kind} status {node.status}"))
         if not node.statement:
             errors.append((node.path, "missing durable statement"))
+        if node.archived_at and _parse_timestamp(node.archived_at) is None:
+            relative_path = node.path.relative_to(context_root).as_posix()
+            errors.append((node.path, f"{relative_path}: invalid archived-at timestamp {node.archived_at}"))
         references = ((node.parent,) if node.parent else ()) + node.children + node.related + node.tracks + node.affects
         for reference in references:
             for message in _link_errors(context_root, node, reference):
