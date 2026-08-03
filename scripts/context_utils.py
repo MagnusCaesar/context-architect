@@ -8,8 +8,10 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import warnings
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,29 @@ from pathlib import Path
 
 CONTEXT_ONLY = "context-only"
 _HYGIENE_RUNNING = False
+
+
+def firstmate_root(env: dict | None = None) -> Path:
+    """Resolve the harness-neutral Firstmate data root."""
+    env = os.environ if env is None else env
+    if env.get("CONTEXT_ARCH_FIRSTMATE"):
+        return Path(env["CONTEXT_ARCH_FIRSTMATE"]).expanduser()
+    if env.get("FIRSTMATE_HOME"):
+        warnings.warn("FIRSTMATE_HOME is deprecated; use CONTEXT_ARCH_FIRSTMATE", DeprecationWarning)
+        return Path(env["FIRSTMATE_HOME"]).expanduser()
+    base = Path(env.get("XDG_DATA_HOME") or (Path(env.get("HOME", str(Path.home()))) / ".local" / "share"))
+    return base / "context-architecture" / "firstmate"
+
+
+def migrate_firstmate(source: Path, target: Path) -> Path:
+    """Copy legacy Firstmate state; never delete or mutate the source."""
+    source, target = Path(source).resolve(), Path(target).resolve()
+    if not source.is_dir():
+        raise FileNotFoundError(source)
+    if target.exists() and any(target.iterdir()):
+        raise FileExistsError(f"migration target is not empty: {target}")
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    return target
 
 
 class MutexTimeout(Exception):

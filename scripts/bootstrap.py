@@ -29,8 +29,12 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from context_utils import resolve_context_page, today_utc, write_atomic
+from context_utils import (context_mutex, firstmate_root, migrate_firstmate,
+                           resolve_context_page, today_utc, write_atomic)
 from hook_dispatch import LEGACY_HOOK_NAMES, merge_hook_config
+from model_policy import (CatalogError, DEFAULT_POLICY, PolicyConflict,
+                          fetch_catalog, refresh_policy, resolve_roles,
+                          write_profiles)
 from platforms import (PlatformError, install_bootloaders, managed_hook_config,
                        platform_choice, platform_homes, preflight_bootloaders,
                        resolve_platform)
@@ -394,6 +398,64 @@ SELF_HEALING_CONFIG_DEFAULTS = {
 }
 
 
+def configured_roles(policy: dict) -> dict[str, tuple[str, str]]:
+    return {role: (policy[role]["model"], policy[role]["effort"])
+            for role in ("lead", "balanced", "economy")}
+
+
+def install_default_profiles(target: Path, config: dict) -> list[str]:
+    policy = config.setdefault("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
+    return [str(path.relative_to(target)) for path in write_profiles(target, configured_roles(policy), policy)]
+
+
+def refresh_codex_profiles(target: Path, context_dir: Path) -> dict:
+    """Refresh generated profiles only from an explicit, valid Codex catalog."""
+    config_path = context_dir / "config.json"
+    try:
+        catalog = fetch_catalog()
+    except CatalogError as exc:
+        return {"status": "preserved", "changes": [], "notices": [str(exc)]}
+    with context_mutex(context_dir, "model-policy"):
+        config = json.loads(config_path.read_text(errors="replace"))
+        current = config.get("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
+        updated, changes, notices = refresh_policy(current, catalog, refresh=True)
+        try:
+            roles = resolve_roles(catalog, updated)
+            write_profiles(target, roles, updated)
+        except (CatalogError, PolicyConflict) as exc:
+            return {"status": "preserved", "changes": [], "notices": notices + [str(exc)]}
+        if updated != current:
+            config["modelPolicy"] = updated
+            write_atomic(config_path, json.dumps(config, indent=2) + "\n", context_root=context_dir)
+        return {"status": "updated" if changes else "verified", "changes": changes, "notices": notices}
+
+
+def ensure_firstmate_state(context_dir: Path) -> None:
+    registry = context_dir / "project-registry.html"
+    inbox = context_dir / "capture-inbox.html"
+    if not registry.exists():
+        write_atomic(registry, """<!DOCTYPE html><html><head><title>Firstmate Projects</title></head><body>
+<h1>Registered projects</h1><section id="projects">
+<!-- context-architecture:projects:start -->
+<!-- context-architecture:projects:end -->
+</section></body></html>\n""", context_root=context_dir)
+    if not inbox.exists():
+        write_atomic(inbox, """<!DOCTYPE html><html><head><title>Firstmate Capture Inbox</title></head><body>
+<h1>Capture inbox</h1><section id="candidates"></section></body></html>\n""", context_root=context_dir)
+    state = context_dir / ".validation-state.json"
+    if not state.exists():
+        write_atomic(state, json.dumps({"lastValidated": None, "status": "not-run"}, indent=2) + "\n", context_root=context_dir)
+    index = context_dir / "index.html"
+    if index.exists() and "./project-registry.html" not in index.read_text(errors="replace"):
+        content = index.read_text(errors="replace")
+        links = ('      <li><a href="./project-registry.html">project-registry.html</a> — managed project roots</li>\n'
+                 '      <li><a href="./capture-inbox.html">capture-inbox.html</a> — private suggestions inbox</li>\n')
+        write_atomic(index, content.replace("      </ul>", links + "      </ul>", 1), context_root=context_dir)
+    context_dir.parent.chmod(0o700)
+    for path in (registry, inbox, context_dir / "config.json", state):
+        path.chmod(0o600)
+
+
 def refresh_context(target: Path, platforms) -> dict:
     """Idempotently refresh skill-owned machinery in an existing context/ dir.
 
@@ -476,6 +538,9 @@ def refresh_context(target: Path, platforms) -> dict:
             if k not in cfg:
                 cfg[k] = v
                 config_added.append(k)
+        if "codex" in platforms and "modelPolicy" not in cfg:
+            cfg["modelPolicy"] = json.loads(json.dumps(DEFAULT_POLICY))
+            config_added.append("modelPolicy")
         if config_added:
             write_atomic(config_path, json.dumps(cfg, indent=2) + "\n", context_root=context_dir)
             updated.append(f"config.json (+{','.join(config_added)})")
@@ -495,6 +560,13 @@ def refresh_context(target: Path, platforms) -> dict:
     # Re-render managed bootloader block (marker-delimited; authored prose untouched)
     for _bl in install_bootloaders(target, platforms):
         updated.append(_bl)
+
+    model_report = {"status": "not-applicable", "changes": [], "notices": []}
+    if "codex" in platforms:
+        model_report = refresh_codex_profiles(target, context_dir)
+        updated.extend(f"model profile {change}" for change in model_report["changes"])
+    if _scope == "global":
+        ensure_firstmate_state(context_dir)
 
     # Run validation, capture failures
     validate_script = scripts_dst / "validate.py"
@@ -525,6 +597,7 @@ def refresh_context(target: Path, platforms) -> dict:
         "validate_ran": validate_ran,
         "validate_passed": validate_passed,
         "validate_failures": validate_failures,
+        "model_policy": model_report,
     }
 
 
@@ -663,7 +736,11 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     for key in ("defaultRole", "agentRoles", "permissionProfiles"):
         if key in permission_defaults:
             config_data.setdefault(key, permission_defaults[key])
+    if "codex" in platforms:
+        config_data.setdefault("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
     write_atomic(context_dir / "config.json", json.dumps(config_data, indent=2) + "\n", context_root=context_dir)
+    if "codex" in platforms:
+        install_default_profiles(target, config_data)
 
     # Generate index.html
     today = today_utc()
@@ -1218,12 +1295,14 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
 
     install_bootloaders(target, platforms)
     install_platform_hooks(target, platforms, scope=scope)
+    if scope == "global":
+        ensure_firstmate_state(context_dir)
     return context_dir
 
 
 def main():
     parser = argparse.ArgumentParser(description="Bootstrap context/ architecture")
-    parser.add_argument("--target", required=True, help="Project root directory")
+    parser.add_argument("--target", help="Project root; global scope defaults to the neutral Firstmate data root")
     parser.add_argument("--scan", action="store_true", help="Scan only, print findings")
     parser.add_argument("--generate", action="store_true", help="Generate from config")
     parser.add_argument("--config", help="Path to config JSON with page list")
@@ -1235,12 +1314,38 @@ def main():
     parser.add_argument("--scope", choices=["project", "global"], default="project",
                         help="project = standard per-project context (default); "
                              "global = first-mate cross-project context instance")
+    parser.add_argument("--init-git", action="store_true",
+                        help="Initialize the global Firstmate context Git repository")
+    parser.add_argument("--migrate-firstmate", metavar="LEGACY_ROOT",
+                        help="Copy legacy Firstmate state into the neutral root, then exit")
     args = parser.parse_args()
 
-    target = Path(args.target).resolve()
+    if args.scope == "project" and not args.target:
+        parser.error("--target is required for project scope")
+    if args.scope != "global" and (args.init_git or args.migrate_firstmate):
+        parser.error("--init-git and --migrate-firstmate require --scope global")
+    target = Path(args.target).resolve() if args.target else firstmate_root().resolve()
+    if args.migrate_firstmate:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            migrate_firstmate(Path(args.migrate_firstmate), target)
+        except (FileNotFoundError, FileExistsError, OSError) as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}))
+            sys.exit(1)
+        print(f"Migrated Firstmate state to {target}; source preserved")
+        return
+    if args.scope == "global":
+        target.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not target.is_dir():
         print(f"ERROR: {target} is not a directory")
         sys.exit(1)
+    if args.init_git:
+        context_repo = target / "context"
+        context_repo.mkdir(exist_ok=True)
+        result = subprocess.run(["git", "init", str(context_repo)], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(json.dumps({"status": "error", "error": result.stderr.strip() or "git init failed"}))
+            sys.exit(1)
 
     # Refresh mode: update machinery only, never touch authored content
     if args.refresh:
@@ -1262,6 +1367,10 @@ def main():
         print(f"  - {len(report['updated'])} machinery files updated")
         if report.get("config_keys_added"):
             print(f"  - config keys added: {', '.join(report['config_keys_added'])}")
+        for change in report.get("model_policy", {}).get("changes", []):
+            print(f"  - model policy: {change}")
+        for notice in report.get("model_policy", {}).get("notices", []):
+            print(f"  - model policy preserved: {notice}")
         if report.get("validate_ran"):
             if report["validate_passed"]:
                 print("  - validation: PASS")

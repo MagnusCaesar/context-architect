@@ -13,7 +13,7 @@ mkdir -p "$(dirname "$OUT")"
 # uncommitted skill edits still package.
 TAR=$(mktemp); trap 'rm -f "$TAR"' EXIT
 while IFS= read -r -d '' file; do
-  [ -e "$file" ] && printf '%s\0' "$file"
+  if [ -e "$file" ]; then printf '%s\0' "$file"; fi
 done < <(git ls-files -co --exclude-standard -z) | tar czf "$TAR" --null -T -
 
 HDR_LINES=$(wc -l < installer-header.sh)

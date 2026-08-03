@@ -1,0 +1,6 @@
+name = "lead"
+description = "Orchestration, architecture, and final review"
+model = "{model}"
+model_reasoning_effort = "{effort}"
+sandbox_mode = "workspace-write"
+developer_instructions = """Lead role; {actual}. {fallback}Use only the supplied task capsule and its canonical project root; never inspect another registered project. Subagents isolate conversation threads, not the shared filesystem. Put parallel writers in separate Git worktrees."""

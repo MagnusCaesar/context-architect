@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """fm-review.py — walk the first-mate registry and run each project's existing
 hygiene/reachability/validate scripts. Read-only; never mutates project state."""
-import argparse, json, os, re, subprocess, sys
+import argparse, html, json, re, subprocess, sys
 from pathlib import Path
+
+from context_utils import firstmate_root
 
 def parse_registry(reg: Path):
     """Yield (name, context_path) from <article class="project">name | path | ...</article>."""
     if not reg.exists():
         return
-    html = reg.read_text(errors="replace")
-    for m in re.finditer(r'<article[^>]*class="project"[^>]*>(.*?)</article>', html, re.S):
-        text = re.sub(r"<[^>]*>", "", m.group(1))
+    content = reg.read_text(errors="replace")
+    for m in re.finditer(r'<article[^>]*class="project"[^>]*>(.*?)</article>', content, re.S):
+        text = html.unescape(re.sub(r"<[^>]*>", "", m.group(1)))
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
             continue
@@ -44,9 +46,14 @@ def validate_failures(ctx: Path):
         return ["timeout"]
     return [ln for ln in r.stdout.splitlines() if ln.strip().startswith("FAIL")]
 
+
+def short_status(result: dict) -> str:
+    status = result.get("status")
+    return status if isinstance(status, str) and status else "unknown"
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--firstmate", default=os.path.expanduser("~/.claude/firstmate"))
+    ap.add_argument("--firstmate", default=str(firstmate_root()))
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -59,21 +66,20 @@ def main():
             report["dead_paths"].append({"name": name, "path": cpath})
             continue
         scripts = ctx / "scripts"
-        report["projects"].append({
-            "name": name, "path": cpath,
-            "hygiene": run_json(scripts / "daily-hygiene.py", ctx),
-            "reachability": run_json(scripts / "check-reachability.py", ctx),
-            "validate_failures": validate_failures(ctx),
-        })
+        hygiene = short_status(run_json(scripts / "daily-hygiene.py", ctx))
+        reachability = short_status(run_json(scripts / "check-reachability.py", ctx))
+        failures = len(validate_failures(ctx))
+        status = "ok" if hygiene == "ok" and reachability == "ok" and failures == 0 else "issues"
+        report["projects"].append({"name": name, "path": cpath, "status": status,
+                                   "hygiene": hygiene, "reachability": reachability,
+                                   "validation": "ok" if failures == 0 else f"{failures} failures"})
 
     if args.json:
         print(json.dumps(report, indent=2))
     else:
         for p in report["projects"]:
-            nfail = len(p["validate_failures"])
-            print(f"{p['name']}: validate {'OK' if nfail == 0 else str(nfail)+' FAIL'} | "
-                  f"hygiene {p['hygiene'].get('status','?')} | "
-                  f"reach {p['reachability'].get('status','?')}")
+            print(f"{p['name']}: {p['status']} | validate {p['validation']} | "
+                  f"hygiene {p['hygiene']} | reach {p['reachability']}")
         for d in report["dead_paths"]:
             print(f"DEAD: {d['name']} -> {d['path']}")
 
