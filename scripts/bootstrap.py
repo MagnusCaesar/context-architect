@@ -32,17 +32,27 @@ from pathlib import Path
 from context_utils import (
     ContextRootError,
     context_root_for_bootstrap,
+    context_mutex,
+    firstmate_root,
     generate_history,
+    migrate_firstmate,
     resolve_context_page,
     today_utc,
     write_atomic,
     write_context_locator,
 )
+from hook_dispatch import LEGACY_HOOK_NAMES, merge_hook_config
+from model_policy import (DIRECT_REJECTED_MODELS, CatalogError, DEFAULT_POLICY,
+                          PolicyConflict, bundle_digests, direct_surface_roles,
+                          fetch_catalog, refresh_policy, resolve_roles,
+                          write_policy_bundle)
+from platforms import (PlatformError, install_bootloaders, managed_hook_config,
+                       platform_choice, platform_homes, preflight_bootloaders,
+                       resolve_platform)
 
 
 SKILL_ROOT = Path(__file__).parent.parent
 TEMPLATES_DIR = SKILL_ROOT / "templates"
-BOOTLOADER_TEMPLATE = TEMPLATES_DIR / "bootloader-block.md"
 
 CORE_PAGES = [
     {"name": "index.html", "purpose": "Root entry point and page map", "auto": True},
@@ -288,141 +298,6 @@ def normalize_pages(pages):
     return normalized
 
 
-BOOTLOADER_START = "<!-- context-architecture:start -->"
-BOOTLOADER_END = "<!-- context-architecture:end -->"
-
-
-def render_bootloader_block() -> str:
-    block = BOOTLOADER_TEMPLATE.read_text(errors="replace")
-    if BOOTLOADER_START not in block or BOOTLOADER_END not in block:
-        raise ValueError(f"{BOOTLOADER_TEMPLATE} must contain context-architecture markers")
-    return block
-
-
-def upsert_bootloader(path: Path, title: str) -> None:
-    block = render_bootloader_block().rstrip() + "\n"
-    if path.exists():
-        text = path.read_text(errors="replace")
-        pattern = re.compile(
-            rf"{re.escape(BOOTLOADER_START)}.*?{re.escape(BOOTLOADER_END)}\n?",
-            flags=re.S,
-        )
-        if pattern.search(text):
-            updated = pattern.sub(block, text)
-        else:
-            updated = text.rstrip() + "\n\n" + block
-    else:
-        updated = f"# {title}\n\n{block}"
-    write_atomic(path, updated)
-
-
-CLAUDE_HOOKS_SETTINGS = {
-    "hooks": {
-        "UserPromptSubmit": [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "bash context/hooks/remind-capture-decision.sh",
-                    }
-                ],
-            }
-        ],
-        "PreToolUse": [
-            {
-                "matcher": "Edit|Write",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "bash context/hooks/pre-edit-context-inject.sh",
-                    }
-                ],
-            }
-        ],
-        "PostToolUse": [
-            {
-                "matcher": "Edit|Write",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "bash context/hooks/post-edit-validate-and-stale.sh",
-                    }
-                ],
-            }
-        ],
-    }
-}
-
-_STOP_HOOK = {
-    "Stop": [
-        {"hooks": [
-            {"type": "command", "command": "bash context/hooks/capture-on-stop.sh"},
-            {"type": "command", "command": "bash context/hooks/auto-commit-context.sh"},
-        ]}
-    ]
-}
-# Commit context when a SUBAGENT finishes editing too (subagents do most edits;
-# whoever held the lock commits when they finish, which releases the lock).
-_SUBAGENT_STOP_HOOK = {
-    "SubagentStop": [
-        {"hooks": [
-            {"type": "command", "command": "bash context/hooks/auto-commit-context.sh"},
-        ]}
-    ]
-}
-_SESSION_START_HOOK = {
-    "SessionStart": [
-        {"hooks": [{"type": "command",
-                    "command": "bash context/hooks/session-start-inject.sh"}]}
-    ]
-}
-_SUBAGENT_START_HOOK = {
-    "SubagentStart": [
-        {"hooks": [{"type": "command",
-                    "command": "bash context/hooks/subagent-start-inject.sh"}]}
-    ]
-}
-_READ_DIRECTION_UPS = {"type": "command",
-                       "command": "bash context/hooks/remind-context-read.sh"}
-_READ_DIRECTION_POST = {
-    "matcher": "Read",
-    "hooks": [{"type": "command",
-               "command": "bash context/hooks/post-read-context-gate.sh"}]
-}
-
-def hooks_for_scope(scope: str) -> dict:
-    """Return the hooks dict to register for the given scope."""
-    hooks = json.loads(json.dumps(CLAUDE_HOOKS_SETTINGS["hooks"]))  # deep copy
-    hooks.update(_STOP_HOOK)                 # both scopes capture + commit on Stop
-    hooks.update(_SUBAGENT_STOP_HOOK)        # commit when a subagent finishes editing
-    hooks.update(_SUBAGENT_START_HOOK)       # both scopes inject into subagents
-    # read-direction: append remind-context-read to UserPromptSubmit, add Read gate
-    hooks["UserPromptSubmit"][0]["hooks"].append(dict(_READ_DIRECTION_UPS))
-    hooks.setdefault("PostToolUse", []).append(dict(_READ_DIRECTION_POST))
-    if scope == "global":
-        hooks.update(_SESSION_START_HOOK)    # global also injects at session start
-    # Final deep copy so the returned dict shares no nested objects with the
-    # module-level fragments spliced in above (the contract is "independent dict").
-    return json.loads(json.dumps(hooks))
-
-
-def absolutize_hooks(hooks: dict, target: Path) -> dict:
-    """Rewrite 'bash context/hooks/X' commands to absolute paths.
-
-    Hooks fire with the session's cwd, which is not always the project root, so
-    relative 'context/hooks/...' fails from any subdir. Anchor them to target.
-    """
-    prefix = "bash context/hooks/"
-    abs_base = f"bash {target.resolve()}/context/hooks/"
-    for groups in hooks.values():
-        for g in groups:
-            for h in g.get("hooks", []):
-                cmd = h.get("command", "")
-                if cmd.startswith(prefix):
-                    h["command"] = abs_base + cmd[len(prefix):]
-    return hooks
-
-
 def install_git_hook(repo_dir: Path, hooks_src: Path, name: str) -> bool:
     """Install a named git hook into repo_dir's real hooks dir.
 
@@ -492,42 +367,40 @@ def install_pre_commit(context_dir: Path, hooks_src: Path, config: dict | None) 
     return installed
 
 
-def detect_platform() -> str:
-    """Detect whether running under Claude Code or Codex."""
-    if os.environ.get("CLAUDE_CODE") or Path.home().joinpath(".claude").is_dir():
-        return "claude"
-    if os.environ.get("CODEX") or Path.home().joinpath(".codex").is_dir():
-        return "codex"
-    skill_path = str(SKILL_ROOT)
-    if ".claude" in skill_path:
-        return "claude"
-    if ".codex" in skill_path:
-        return "codex"
-    return "claude"
+def reconcile_legacy_hook_files(context_dir: Path) -> list[str]:
+    """Remove only known superseded lifecycle wrappers from a generated target."""
+    removed = []
+    hooks_dir = context_dir / "hooks"
+    for name in sorted(LEGACY_HOOK_NAMES):
+        path = hooks_dir / name
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+            removed.append(name)
+    return removed
 
 
-def install_platform_hooks(target: Path, scope: str = "project") -> None:
-    """Install hooks appropriate for the detected platform.
-
-    Claude Code: auto-creates .claude/settings.json with stdin-based wrapper hooks.
-    Codex: hooks are copied to context/hooks/ but not auto-installed (Codex agents
-    read the install comment in each hook script and AGENTS.md bootloader instructions).
-    """
-    platform = detect_platform()
-    if platform != "claude":
-        return
-    claude_dir = target / ".claude"
-    claude_dir.mkdir(exist_ok=True)
-    settings_path = claude_dir / "settings.json"
-    new_hooks = absolutize_hooks(hooks_for_scope(scope), target)
-    if settings_path.exists():
-        existing = json.loads(settings_path.read_text(errors="replace"))
-        if "hooks" in existing:
-            return  # idempotent guard preserved
-        existing["hooks"] = new_hooks
-        write_atomic(settings_path, json.dumps(existing, indent=2) + "\n")
-    else:
-        write_atomic(settings_path, json.dumps({"hooks": new_hooks}, indent=2) + "\n")
+def install_platform_hooks(
+    target: Path,
+    platforms,
+    context_root: Path | None = None,
+    scope: str = "project",
+) -> None:
+    """Merge only this adapter's dispatcher entries into selected configs."""
+    locations = {
+        "claude": target / ".claude" / "settings.json",
+        "codex": target / ".codex" / "hooks.json",
+    }
+    for platform in platforms:
+        path = locations[platform]
+        raw = path.read_bytes() if path.exists() else {}
+        merged = merge_hook_config(
+            raw,
+            managed_hook_config(platform, target, scope, context_root=context_root),
+        )
+        if isinstance(merged, (bytes, str)):  # malformed JSON: preserve byte-for-byte
+            continue
+        path.parent.mkdir(exist_ok=True)
+        write_atomic(path, json.dumps(merged, indent=2) + "\n")
 
 
 SELF_HEALING_CONFIG_DEFAULTS = {
@@ -542,7 +415,61 @@ SELF_HEALING_CONFIG_DEFAULTS = {
 }
 
 
-def refresh_context(target: Path) -> dict:
+def install_default_profiles(target: Path, context_dir: Path, config: dict) -> list[str]:
+    policy = config.setdefault("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
+    paths = write_policy_bundle(target, context_dir / "config.json", config,
+                                direct_surface_roles(policy), policy)
+    return [str(path.relative_to(target)) for path in paths if path != context_dir / "config.json"]
+
+
+def refresh_codex_profiles(target: Path, context_dir: Path) -> dict:
+    """Refresh generated profiles only from an explicit, valid Codex catalog."""
+    config_path = context_dir / "config.json"
+    try:
+        catalog = fetch_catalog()
+    except CatalogError as exc:
+        return {"status": "preserved", "changes": [], "notices": [str(exc)]}
+    with context_mutex(context_dir, "model-policy"):
+        expected = bundle_digests(target, config_path)
+        config = json.loads(config_path.read_text(errors="replace"))
+        current = config.get("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
+        updated, changes, notices = refresh_policy(current, catalog, refresh=True)
+        try:
+            roles = resolve_roles(catalog, updated, rejected_models=set(DIRECT_REJECTED_MODELS))
+            config["modelPolicy"] = updated
+            write_policy_bundle(target, config_path, config, roles, updated, expected=expected)
+        except (CatalogError, OSError, PolicyConflict, ValueError) as exc:
+            return {"status": "preserved", "changes": [], "notices": notices + [str(exc)]}
+        return {"status": "updated" if changes else "verified", "changes": changes, "notices": notices}
+
+
+def ensure_firstmate_state(context_dir: Path) -> None:
+    registry = context_dir / "project-registry.html"
+    inbox = context_dir / "capture-inbox.html"
+    if not registry.exists():
+        write_atomic(registry, """<!DOCTYPE html><html><head><title>Firstmate Projects</title></head><body>
+<h1>Registered projects</h1><section id="projects">
+<!-- context-architecture:projects:start -->
+<!-- context-architecture:projects:end -->
+</section></body></html>\n""", context_root=context_dir)
+    if not inbox.exists():
+        write_atomic(inbox, """<!DOCTYPE html><html><head><title>Firstmate Capture Inbox</title></head><body>
+<h1>Capture inbox</h1><section id="candidates"></section></body></html>\n""", context_root=context_dir)
+    state = context_dir / ".validation-state.json"
+    if not state.exists():
+        write_atomic(state, json.dumps({"lastValidated": None, "status": "not-run"}, indent=2) + "\n", context_root=context_dir)
+    index = context_dir / "index.html"
+    if index.exists() and "./project-registry.html" not in index.read_text(errors="replace"):
+        content = index.read_text(errors="replace")
+        links = ('      <li><a href="./project-registry.html">project-registry.html</a> — managed project roots</li>\n'
+                 '      <li><a href="./capture-inbox.html">capture-inbox.html</a> — private suggestions inbox</li>\n')
+        write_atomic(index, content.replace("      </ul>", links + "      </ul>", 1), context_root=context_dir)
+    context_dir.parent.chmod(0o700)
+    for path in (registry, inbox, context_dir / "config.json", state):
+        path.chmod(0o600)
+
+
+def refresh_context(target: Path, platforms) -> dict:
     """Idempotently refresh skill-owned machinery in an existing context/ dir.
 
     Updates scripts, hooks, git post-commit, .gitignore, settings.json hooks, and
@@ -553,6 +480,8 @@ def refresh_context(target: Path) -> dict:
     context_dir = context_root_for_bootstrap(target)
     if not (context_dir / "index.html").exists():
         return {"status": "error", "error": f"{context_dir}/index.html not found — not a context-arch dir; run full bootstrap first"}
+    platform_choice(platforms)
+    preflight_bootloaders(target, platforms)
 
     updated = []
 
@@ -583,6 +512,8 @@ def refresh_context(target: Path) -> dict:
         for hook in hooks_src.glob("*.sh"):
             shutil.copy2(hook, hooks_dst / hook.name)
             updated.append(f"hooks/{hook.name}")
+    for name in reconcile_legacy_hook_files(context_dir):
+        updated.append(f"removed hooks/{name}")
 
     # Install/refresh git post-commit hook
     if install_post_commit(context_dir, hooks_src):
@@ -624,30 +555,28 @@ def refresh_context(target: Path) -> dict:
             write_atomic(config_path, json.dumps(cfg, indent=2) + "\n", context_root=context_dir)
             updated.append(f"config.json (+{','.join(config_added)})")
 
-    # Force-update settings.json hooks (install_platform_hooks refuses if hooks exist)
-    if detect_platform() == "claude":
-        claude_dir = target / ".claude"
-        claude_dir.mkdir(exist_ok=True)
-        settings_path = claude_dir / "settings.json"
-        if settings_path.exists():
-            existing = json.loads(settings_path.read_text(errors="replace"))
-        else:
-            existing = {}
-        # Read stored scope so refresh preserves global hooks (SessionStart+Stop)
-        _cfg_path = context_dir / "config.json"
-        _scope = "project"
-        if _cfg_path.exists():
-            try:
-                _scope = json.loads(_cfg_path.read_text(errors="replace")).get("scope", "project")
-            except (json.JSONDecodeError, OSError):
-                pass
-        existing["hooks"] = absolutize_hooks(hooks_for_scope(_scope), context_dir.parent)
-        write_atomic(settings_path, json.dumps(existing, indent=2) + "\n")
-        updated.append(".claude/settings.json (hooks)")
+    # Preserve selected scope while replacing only marked dispatcher groups.
+    _cfg_path = context_dir / "config.json"
+    _scope = "project"
+    if _cfg_path.exists():
+        try:
+            _scope = json.loads(_cfg_path.read_text(errors="replace")).get("scope", "project")
+        except (json.JSONDecodeError, OSError):
+            pass
+    install_platform_hooks(target, platforms, context_dir, scope=_scope)
+    for platform in platforms:
+        updated.append(f".{platform}/{'settings.json' if platform == 'claude' else 'hooks.json'} (hooks)")
 
     # Re-render managed bootloader block (marker-delimited; authored prose untouched)
-    for _bl in install_bootloaders(target):
+    for _bl in install_bootloaders(target, platforms):
         updated.append(_bl)
+
+    model_report = {"status": "not-applicable", "changes": [], "notices": []}
+    if "codex" in platforms:
+        model_report = refresh_codex_profiles(target, context_dir)
+        updated.extend(f"model profile {change}" for change in model_report["changes"])
+    if _scope == "global":
+        ensure_firstmate_state(context_dir)
 
     # Run validation, capture failures
     validate_script = scripts_dst / "validate.py"
@@ -679,15 +608,8 @@ def refresh_context(target: Path) -> dict:
         "validate_ran": validate_ran,
         "validate_passed": validate_passed,
         "validate_failures": validate_failures,
+        "model_policy": model_report,
     }
-
-
-def install_bootloaders(target: Path) -> list[str]:
-    written = []
-    for filename, title in (("AGENTS.md", "Agent Instructions"), ("CLAUDE.md", "Claude Instructions")):
-        upsert_bootloader(target / filename, title)
-        written.append(filename)
-    return written
 
 
 def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> list:
@@ -752,8 +674,10 @@ def absorb_docs(target: Path, context_dir: Path, findings: dict, today: str) -> 
     return imported
 
 
-def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str = "project"):
+def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str = "project", platforms=("claude",)):
     """Generate the full context/ directory structure."""
+    platform_choice(platforms)
+    preflight_bootloaders(target, platforms)
     pages = normalize_pages(pages)
     context_dir = context_root_for_bootstrap(target)
     context_dir.mkdir(exist_ok=True)
@@ -781,6 +705,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     if hooks_src.exists():
         for hook in hooks_src.glob("*.sh"):
             shutil.copy2(hook, hooks_dst / hook.name)
+    reconcile_legacy_hook_files(context_dir)
 
     # Install git post-commit hook for auto-release
     install_post_commit(context_dir, hooks_src)
@@ -815,13 +740,18 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
         "scope": scope,
         "autoCommitContext": True,
     }
-    # If a config was passed in explicitly, still stamp scope on it:
+    # If a config was passed in explicitly, still stamp bootstrap selections on it:
     config_data.setdefault("scope", scope)
+    config_data["platform"] = platform_choice(platforms)
     permission_defaults = load_permission_defaults()
     for key in ("defaultRole", "agentRoles", "permissionProfiles"):
         if key in permission_defaults:
             config_data.setdefault(key, permission_defaults[key])
-    write_atomic(context_dir / "config.json", json.dumps(config_data, indent=2) + "\n", context_root=context_dir)
+    if "codex" in platforms:
+        config_data.setdefault("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
+        install_default_profiles(target, context_dir, config_data)
+    else:
+        write_atomic(context_dir / "config.json", json.dumps(config_data, indent=2) + "\n", context_root=context_dir)
 
     # Generate index.html
     today = today_utc()
@@ -1442,8 +1372,10 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
         if not page_path.exists():
             write_atomic(page_path, stub_html, context_root=context_dir)
 
-    install_bootloaders(target)
-    install_platform_hooks(target, scope=scope)
+    install_bootloaders(target, platforms)
+    install_platform_hooks(target, platforms, context_dir, scope=scope)
+    if scope == "global":
+        ensure_firstmate_state(context_dir)
     generate_history(context_dir)
     write_context_locator(target, context_dir)
     return context_dir
@@ -1451,29 +1383,60 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
 
 def main():
     parser = argparse.ArgumentParser(description="Bootstrap context/ architecture")
-    parser.add_argument("--target", required=True, help="Project root directory")
+    parser.add_argument("--target", help="Project root; global scope defaults to the neutral Firstmate data root")
     parser.add_argument("--scan", action="store_true", help="Scan only, print findings")
     parser.add_argument("--generate", action="store_true", help="Generate from config")
     parser.add_argument("--config", help="Path to config JSON with page list")
     parser.add_argument("--pages-json", help="JSON string of pages to generate")
     parser.add_argument("--absorb-docs", action="store_true", help="Import headed docs into context pages and archive copies")
     parser.add_argument("--refresh", action="store_true", help="Idempotently refresh skill machinery in an existing context/ dir (preserves authored content + config values)")
+    parser.add_argument("--platform", choices=["claude", "codex", "both"],
+                        help="Target harness; required when detection is ambiguous")
     parser.add_argument("--scope", choices=["project", "global"], default="project",
                         help="project = standard per-project context (default); "
                              "global = first-mate cross-project context instance")
+    parser.add_argument("--init-git", action="store_true",
+                        help="Initialize the global Firstmate context Git repository")
+    parser.add_argument("--migrate-firstmate", metavar="LEGACY_ROOT",
+                        help="Copy legacy Firstmate state into the neutral root, then exit")
     args = parser.parse_args()
 
-    target = Path(args.target).resolve()
+    if args.scope == "project" and not args.target:
+        parser.error("--target is required for project scope")
+    if args.scope != "global" and (args.init_git or args.migrate_firstmate):
+        parser.error("--init-git and --migrate-firstmate require --scope global")
+    target = Path(args.target).resolve() if args.target else firstmate_root().resolve()
+    if args.migrate_firstmate:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            migrate_firstmate(Path(args.migrate_firstmate), target)
+        except (FileNotFoundError, FileExistsError, OSError) as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}))
+            sys.exit(1)
+        print(f"Migrated Firstmate state to {target}; source preserved")
+        return
+    if args.scope == "global":
+        target.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not target.is_dir():
         print(f"ERROR: {target} is not a directory")
         sys.exit(1)
+    if args.init_git:
+        context_repo = target / "context"
+        context_repo.mkdir(exist_ok=True)
+        result = subprocess.run(["git", "init", str(context_repo)], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(json.dumps({"status": "error", "error": result.stderr.strip() or "git init failed"}))
+            sys.exit(1)
 
     # Refresh mode: update machinery only, never touch authored content
     if args.refresh:
         try:
-            report = refresh_context(target)
-        except ContextRootError as e:
-            print(json.dumps({"status": "error", "error": str(e)}))
+            context_dir = context_root_for_bootstrap(target)
+            stored = json.loads((context_dir / "config.json").read_text(errors="replace"))["platform"]
+            platforms = resolve_platform(stored, {}, {})
+            report = refresh_context(target, platforms)
+        except (ContextRootError, KeyError, OSError, json.JSONDecodeError, PlatformError) as e:
+            print(json.dumps({"status": "error", "error": f"refresh requires stored platform: {e}"}))
             sys.exit(1)
         if report.get("status") == "error":
             print(json.dumps(report, indent=2))
@@ -1482,6 +1445,10 @@ def main():
         print(f"  - {len(report['updated'])} machinery files updated")
         if report.get("config_keys_added"):
             print(f"  - config keys added: {', '.join(report['config_keys_added'])}")
+        for change in report.get("model_policy", {}).get("changes", []):
+            print(f"  - model policy: {change}")
+        for notice in report.get("model_policy", {}).get("notices", []):
+            print(f"  - model policy preserved: {notice}")
         if report.get("validate_ran"):
             if report["validate_passed"]:
                 print("  - validation: PASS")
@@ -1489,6 +1456,7 @@ def main():
                 print(f"  - validation: FAIL ({len(report['validate_failures'])} issues — pages may need migration to newer/stricter checks):")
                 for f in report["validate_failures"]:
                     print(f"      {f}")
+        print("  - new session required for managed instruction or hook changes to reload")
         return
 
     # Scan
@@ -1522,7 +1490,8 @@ def main():
 
     # Generate
     try:
-        context_dir = generate_skeleton(target, pages, config=config, scope=args.scope)
+        platforms = resolve_platform(args.platform, os.environ, platform_homes())
+        context_dir = generate_skeleton(target, pages, config=config, scope=args.scope, platforms=platforms)
         imported = absorb_docs(target, context_dir, findings, today_utc()) if args.absorb_docs else []
     except (ValueError, ContextRootError) as e:
         print(json.dumps({"status": "error", "error": str(e)}))
@@ -1531,7 +1500,12 @@ def main():
     print(f"  - {len(list(context_dir.rglob('*.html')))} HTML pages")
     print(f"  - {len(list((context_dir / 'scripts').glob('*.py')))} scripts")
     print(f"  - {len(list((context_dir / 'hooks').glob('*.sh')))} hooks")
-    print(f"  - AGENTS.md and CLAUDE.md bootloader blocks")
+    bootloader_files = []
+    if "codex" in platforms:
+        bootloader_files.append("AGENTS.md")
+    if "claude" in platforms:
+        bootloader_files.append("CLAUDE.md")
+    print(f"  - {' and '.join(bootloader_files)} bootloader blocks")
     print(f"  - config.json")
     print(f"  - runtime-policy.md")
     print(f"  - context/runbooks/ and docs/context/")
@@ -1543,6 +1517,7 @@ def main():
     print(f"  1. Review and fill stub pages with project-specific content")
     print(f"  2. Run: python3 context/scripts/validate.py")
     print(f"  3. For real ledger hardening, have root/elevated/non-agent user run: context/scripts/harden-ledger.sh context")
+    print("  4. Start a new session for managed instructions and hooks to reload")
 
 
 if __name__ == "__main__":

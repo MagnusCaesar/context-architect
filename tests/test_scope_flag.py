@@ -6,7 +6,7 @@ BOOTSTRAP = SKILL / "scripts" / "bootstrap.py"
 
 def _run(target, *extra):
     return subprocess.run(
-        [sys.executable, str(BOOTSTRAP), "--target", str(target), *extra],
+        [sys.executable, str(BOOTSTRAP), "--target", str(target), "--platform", "claude", *extra],
         capture_output=True, text=True)
 
 def test_scope_global_writes_scope_key():

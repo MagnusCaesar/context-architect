@@ -103,13 +103,29 @@ step_output "bootstrap --scan produces JSON" '"root"' \
 
 # Generate mode
 step "bootstrap generates context/" \
-    python3 "$SCRIPTS/bootstrap.py" --target "$TMP"
+    python3 "$SCRIPTS/bootstrap.py" --target "$TMP" --platform both
 step_output "bootstrap reports bootloader files" "AGENTS.md and CLAUDE.md" \
-    python3 "$SCRIPTS/bootstrap.py" --target "$TMP"
+    python3 "$SCRIPTS/bootstrap.py" --target "$TMP" --platform both
+
+CLAUDE_ONLY="$TMP/platform-claude"
+CODEX_ONLY="$TMP/platform-codex"
+mkdir -p "$CLAUDE_ONLY" "$CODEX_ONLY"
+step "Claude platform bootstrap succeeds" \
+    python3 "$SCRIPTS/bootstrap.py" --target "$CLAUDE_ONLY" --platform claude
+step "Claude platform writes only CLAUDE.md" \
+    test -f "$CLAUDE_ONLY/CLAUDE.md"
+step "Claude platform omits AGENTS.md" \
+    test ! -e "$CLAUDE_ONLY/AGENTS.md"
+step "Codex platform bootstrap succeeds" \
+    python3 "$SCRIPTS/bootstrap.py" --target "$CODEX_ONLY" --platform codex
+step "Codex platform writes only AGENTS.md" \
+    test -f "$CODEX_ONLY/AGENTS.md"
+step "Codex platform omits CLAUDE.md" \
+    test ! -e "$CODEX_ONLY/CLAUDE.md"
 
 BAD_TMP=$(mktemp -d)
 step_output "bootstrap rejects escaping page names" '"status": "error"' \
-    python3 "$SCRIPTS/bootstrap.py" --target "$BAD_TMP" --pages-json '[{"name":"../evil.html","purpose":"bad"}]'
+    python3 "$SCRIPTS/bootstrap.py" --target "$BAD_TMP" --platform codex --pages-json '[{"name":"../evil.html","purpose":"bad"}]'
 python3 - "$BAD_TMP" <<'PY'
 import shutil
 import sys
@@ -176,7 +192,7 @@ step "config.json exists" test -f "$TMP/context/config.json"
 step "runtime-policy.md exists" test -f "$TMP/context/runtime-policy.md"
 step "scripts/ populated" test -f "$TMP/context/scripts/validate.py"
 step "new operational scripts copied" test -f "$TMP/context/scripts/source-claim.py"
-step "hooks/ populated" test -f "$TMP/context/hooks/pre-edit-context-gate.sh"
+step "hook dispatcher populated" test -f "$TMP/context/scripts/hook_dispatch.py"
 step "harden-ledger helper copied" test -f "$TMP/context/scripts/harden-ledger.sh"
 step "check-hardening helper copied" test -f "$TMP/context/scripts/check-hardening.py"
 step_json_file "repo root is portable" "$TMP/context/config.json" "data['repoRoots'][0]['path'] == '.'"

@@ -12,7 +12,9 @@ mkdir -p "$(dirname "$OUT")"
 # so there is no separate include list to keep in sync. Working tree, not HEAD, so
 # uncommitted skill edits still package.
 TAR=$(mktemp); trap 'rm -f "$TAR"' EXIT
-git ls-files -co --exclude-standard -z | tar czf "$TAR" --null -T -
+while IFS= read -r -d '' file; do
+  if [ -e "$file" ]; then printf '%s\0' "$file"; fi
+done < <(git ls-files -co --exclude-standard -z) | tar czf "$TAR" --null -T -
 
 HDR_LINES=$(wc -l < installer-header.sh)
 {

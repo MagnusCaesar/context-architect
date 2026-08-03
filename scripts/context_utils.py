@@ -9,8 +9,10 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import warnings
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,49 @@ CONTEXT_ONLY = "context-only"
 _HYGIENE_RUNNING = False
 CONTEXT_LOCATOR = "context-architecture.json"
 CONTEXT_LOCATOR_VERSION = 1
+
+
+def firstmate_root(env: dict | None = None) -> Path:
+    """Resolve the harness-neutral Firstmate data root."""
+    env = os.environ if env is None else env
+    if env.get("CONTEXT_ARCH_FIRSTMATE"):
+        return Path(env["CONTEXT_ARCH_FIRSTMATE"]).expanduser()
+    if env.get("FIRSTMATE_HOME"):
+        warnings.warn("FIRSTMATE_HOME is deprecated; use CONTEXT_ARCH_FIRSTMATE", FutureWarning, stacklevel=2)
+        return Path(env["FIRSTMATE_HOME"]).expanduser()
+    base = Path(env.get("XDG_DATA_HOME") or (Path(env.get("HOME", str(Path.home()))) / ".local" / "share"))
+    return base / "context-architecture" / "firstmate"
+
+
+def migrate_firstmate(source: Path, target: Path) -> Path:
+    """Copy legacy Firstmate state; never delete or mutate the source."""
+    source, target = Path(source).resolve(), Path(target).resolve()
+    if source == target or target.is_relative_to(source) or source.is_relative_to(target):
+        raise ValueError(f"Firstmate migration roots overlap: {source} and {target}")
+    if not source.is_dir():
+        raise FileNotFoundError(source)
+    if target.exists() and any(target.iterdir()):
+        raise FileExistsError(f"migration target is not empty: {target}")
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    return target
+
+
+def registered_projects(context_root: Path, registry: Path | None = None) -> tuple[tuple[str, str, str, str], ...]:
+    """Read bounded Firstmate registry rows without opening registered projects."""
+    registry = registry or Path(context_root) / "project-registry.html"
+    try:
+        if registry.stat().st_size > 1_048_576:
+            return ()
+        content = registry.read_text(errors="replace")
+    except OSError:
+        return ()
+    projects = []
+    for match in list(re.finditer(r'<article[^>]*class="project"[^>]*>(.*?)</article>', content, re.S))[:256]:
+        text = html.unescape(re.sub(r"<[^>]*>", "", match.group(1)))
+        parts = [re.sub(r"\s+", " ", part).strip() for part in text.split("|", 3)]
+        if len(parts) == 4 and parts[0] and parts[1]:
+            projects.append((parts[0][:80], parts[1][:500], parts[2][:240], parts[3][:40]))
+    return tuple(projects)
 
 
 class MutexTimeout(Exception):
@@ -1125,6 +1170,116 @@ def contention_break_allowed(context_root: Path, page: str, lock_owner: str) -> 
 
     # ponytail: dead-PID fast-break removed — pid sentinel stores getppid() (ephemeral shell), unreliable. Rely on heartbeat staleness. Upgrade path: store a persistent session id in the sentinel, then a real liveness check can return.
     return False
+
+
+def _lock_age_minutes(locked_at: str) -> float | None:
+    if not locked_at:
+        return None
+    try:
+        lock_time = datetime.fromisoformat(locked_at.replace("Z", "+00:00"))
+        if lock_time.tzinfo is None:
+            lock_time = lock_time.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - lock_time).total_seconds() / 60
+
+
+def _set_page_lock(context_root: Path, page_path: Path, agent_id: str) -> None:
+    content = page_path.read_text(errors="replace")
+    content = set_meta_in_content(content, "locked", "true")
+    content = set_meta_in_content(content, "locked-by", agent_id)
+    content = set_meta_in_content(content, "locked-at", datetime.now(timezone.utc).isoformat())
+    write_atomic(page_path, content, context_root=context_root)
+
+
+def _acquire_page_lock(context_root: Path, page: str, agent_id: str, intent: str) -> dict:
+    page_path = resolve_context_page(context_root, page)
+    if not page_path.exists():
+        result = {
+            "status": "blocked_active_lock",
+            "acquired": False,
+            "reason": f"{page} does not exist",
+            "action": "orchestrator_resolution_required",
+        }
+        append_ledger_event(context_root, "acquire", page, agent_id, result["status"], result["reason"])
+        return result
+
+    if read_meta(page_path, "locked") == "true":
+        locked_by = read_meta(page_path, "locked-by")
+        if locked_by == agent_id:
+            write_pid_sentinel(context_root, page)
+            result = {"status": "acquired", "acquired": True, "already_held": True}
+            append_ledger_event(context_root, "acquire", page, agent_id, "acquired", "already held by same agent")
+            return result
+        locked_at = read_meta(page_path, "locked-at")
+        age = _lock_age_minutes(locked_at)
+        if age is not None and age > int(read_config(context_root).get("staleLockMinutes", 30)):
+            if not has_permission(context_root, agent_id, "break_stale_lock"):
+                result = {
+                    "status": "blocked_active_lock",
+                    "acquired": False,
+                    "reason": f"stale lock held by {locked_by}; break requires orchestrator",
+                    "action": "orchestrator_resolution_required",
+                }
+                append_ledger_event(context_root, "acquire", page, agent_id, result["status"], result["reason"])
+                return result
+            ledger_status = "broke_stale_lock"
+            break_reason = ""
+        elif locked_by != agent_id and contention_break_allowed(context_root, page, locked_by):
+            ledger_status = "contention_break"
+            break_reason = "contention_heartbeat_stale"
+        else:
+            if intent:
+                write_intent(context_root, page, agent_id, intent, blocked=True)
+            result = {
+                "status": "blocked_active_lock",
+                "acquired": False,
+                "reason": f"locked by {locked_by} since {locked_at}",
+                "action": "orchestrator_resolution_required",
+            }
+            append_ledger_event(context_root, "acquire", page, agent_id, result["status"], result["reason"])
+            return result
+
+        _set_page_lock(context_root, page_path, agent_id)
+        remove_active_lock(context_root, page, locked_by)
+        add_active_lock(context_root, page, agent_id)
+        write_pid_sentinel(context_root, page)
+        result = {
+            "status": "broke_stale_lock",
+            "acquired": True,
+            "broke_stale": True,
+            "previous_owner": locked_by,
+        }
+        if break_reason:
+            result["break_reason"] = break_reason
+        append_ledger_event(context_root, "acquire", page, agent_id, ledger_status, f"previous_owner={locked_by}")
+        return result
+
+    _set_page_lock(context_root, page_path, agent_id)
+    add_active_lock(context_root, page, agent_id)
+    write_pid_sentinel(context_root, page)
+    if intent:
+        write_intent(context_root, page, agent_id, intent)
+    result = {"status": "acquired", "acquired": True}
+    append_ledger_event(context_root, "acquire", page, agent_id, "acquired", "lock acquired")
+    return result
+
+
+def acquire_page_lock(context_root: Path, page: str, agent_id: str, intent: str = "") -> dict:
+    """Acquire one context page lock without task/capsule side effects."""
+    try:
+        ceiling = float(read_config(context_root).get("lockMutexTimeoutSec", 10))
+    except (TypeError, ValueError):
+        ceiling = 10.0
+    try:
+        with context_mutex(context_root, f"lock-{page}"):
+            return _acquire_page_lock(context_root, page, agent_id, intent)
+    except MutexTimeout:
+        return {
+            "status": "blocked_lock_busy",
+            "acquired": False,
+            "reason": f"lock mutex busy >{ceiling:g}s",
+        }
 
 
 def reap_stale_locks(context_root: Path) -> list[dict]:

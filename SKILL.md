@@ -91,42 +91,39 @@ python3 "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project
 ```
 `--scan` is inventory-only and does not write files. Run without `--scan` to generate the full `context/` skeleton, managed `AGENTS.md`/`CLAUDE.md` bootloader blocks, and install the **context gate hooks** into project-level `.claude/settings.json` after resolving ambiguities.
 
-### Global first-mate scope (fresh target only)
+### Global Firstmate scope
 
-When the target has **no** `context/` yet, ask the captain which scope to set up
-(bootstrap is non-interactive, so the *agent* asks, then passes the flag):
+Firstmate data defaults to
+`${XDG_DATA_HOME:-$HOME/.local/share}/context-architecture/firstmate`.
+`CONTEXT_ARCH_FIRSTMATE` overrides it. Bootstrap without `--target`:
 
-> No context found here. Set up: **[1] project** context (default) or
-> **[2] global** first-mate context?
+```bash
+python3 "$SKILL_DIR/scripts/bootstrap.py" --scope global --platform both
+```
 
-- **[1] / default:** proceed exactly as the Bootstrap block above
-  (`bootstrap.py --target <dir>`). Nothing changes.
-- **[2] global:** this becomes the cross-project first-mate instance. Run:
-  ```bash
-  mkdir -p ~/.claude/firstmate && \
-  python3 "$SKILL_DIR/scripts/bootstrap.py" --target ~/.claude/firstmate --scope global
-  ```
-  Then seed the project registry by walking your projects (run directly, or
-  dispatch one `model: haiku` subagent so the raw walk output stays out of context):
-  ```bash
-  python3 ~/.claude/firstmate/context/scripts/seed-registry.py \
-      --roots ~/projects --max-depth 4 >> /tmp/fm-registry.txt
-  ```
-  Paste the resulting lines into `~/.claude/firstmate/context/project-registry.html`
-  as `<article class="project">name | path | one-liner | status</article>` rows.
+Git is opt-in with `--init-git`. Copy a legacy root without deleting it with
+`--migrate-firstmate /legacy/root`. Refresh the managed registry block without
+touching authored prose:
 
-Re-running `--scope global` later is safe (idempotent hooks/scripts refresh); re-run
-`seed-registry.py` to pick up new projects and flag dead paths.
+```bash
+python3 "$FIRSTMATE/context/scripts/seed-registry.py" --roots ~/projects \
+  --registry "$FIRSTMATE/context/project-registry.html"
+python3 "$FIRSTMATE/context/scripts/fm-review.py" --firstmate "$FIRSTMATE"
+```
 
-**Routing note:** requests about the context-architecture framework itself
-(bootstrapping, hooks, the registry, this skill) are the first-mate's own domain —
-route them to `~/.claude/firstmate/context/`, not into any individual project.
+Review output is limited to registered project names, roots, and short status.
+Captured suggestions default to the private Firstmate inbox. Framework work
+routes to the Firstmate context, never an individual project.
 
 ### Refresh (existing project — idempotent upgrade)
 ```bash
 python3 "$SKILL_DIR/scripts/bootstrap.py" --target /path/to/project --refresh
 ```
 Run this on a directory that **already has `context/`** to pull in newer skill machinery without disturbing authored content. Idempotent — running it twice changes nothing the second time.
+
+For Codex targets, only this explicit refresh queries `codex app-server`
+`model/list`. Generated role profiles change only for an unambiguous, locally
+available upgrade target reported by Codex; failures preserve installed profiles.
 
 **Updates (skill-owned, overwritten):** all `context/scripts/*.py` + `*.sh`, `context/hooks/*.sh`, the git `post-commit` hook, `runtime-policy.md`, `.gitignore` (`.locks/` entry), and the `hooks` block in `.claude/settings.json`. Also **adds any missing self-healing config keys** (`autoAcquireOnEdit`, `autoReleaseOnCommit`, `autoReleaseIdleMinutes`, `contentionBreakMinutes`, `staleLockMinutes`) via merge.
 

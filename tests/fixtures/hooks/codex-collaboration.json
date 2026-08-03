@@ -1,0 +1,11 @@
+{
+  "event_name": "PreToolUse",
+  "cwd": "/work/project",
+  "session_id": "codex-session",
+  "turn_id": "turn-3",
+  "agent_id": "agent-9",
+  "tool_name": "collaborationspawn_agent",
+  "tool_input": {"task_name": "audit", "message": "review scope"},
+  "permission_mode": "workspace-write",
+  "model": "gpt-test"
+}

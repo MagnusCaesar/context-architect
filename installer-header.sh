@@ -1,26 +1,44 @@
 #!/usr/bin/env bash
 # context-architecture skill installer @VERSION@ (self-extracting; tarball appended below)
-# Usage: sh THIS_FILE [--claude-only|--codex-only] [--dry-run]
+# Usage: sh THIS_FILE [--platform claude|codex|both] [--dry-run]
 set -euo pipefail
 
 SKILL=context-architecture
 VERSION=@VERSION@
 PAYLOAD_LINE=@LINES@
-TARGETS=("$HOME/.claude/skills" "$HOME/.codex/skills")
+PLATFORM=
+TARGETS=()
 DRY=
 
-for a in "$@"; do
-  case "$a" in
-    --claude-only) TARGETS=("$HOME/.claude/skills") ;;
-    --codex-only)  TARGETS=("$HOME/.codex/skills") ;;
-    --dry-run)     DRY=1 ;;
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --platform)
+      [ "$#" -gt 1 ] || { echo "--platform needs claude, codex, or both" >&2; exit 2; }
+      PLATFORM=$2; shift 2 ;;
+    --claude-only) PLATFORM=claude; shift ;;
+    --codex-only)  PLATFORM=codex; shift ;;
+    --dry-run)     DRY=1; shift ;;
     -h|--help)     sed -n '2,3p' "$0"; exit 0 ;;
-    *) echo "unknown option: $a" >&2; exit 2 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
-command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
+case "$PLATFORM" in
+  claude) TARGETS=("$HOME/.claude/skills") ;;
+  codex)  TARGETS=("$HOME/.codex/skills") ;;
+  both)   TARGETS=("$HOME/.claude/skills" "$HOME/.codex/skills") ;;
+  "") echo "choose --platform claude|codex|both" >&2; exit 2 ;;
+  *) echo "--platform must be claude, codex, or both" >&2; exit 2 ;;
+esac
 
+if [ -n "$DRY" ]; then
+  for root in "${TARGETS[@]}"; do
+    echo "would install -> $root/$SKILL"
+  done
+  exit 0
+fi
+
+command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 tail -n +"$PAYLOAD_LINE" "$0" | tar xzf - -C "$STAGE"
@@ -30,7 +48,6 @@ printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 
 for root in "${TARGETS[@]}"; do
   dest="$root/$SKILL"
-  if [ -n "$DRY" ]; then echo "would install -> $dest"; continue; fi
   mkdir -p "$root"
   # Replace, but keep the previous copy recoverable: this skill's own repo may live here.
   if [ -e "$dest" ]; then
@@ -43,7 +60,6 @@ for root in "${TARGETS[@]}"; do
   echo "installed $SKILL $VERSION -> $dest"
 done
 
-[ -n "$DRY" ] && exit 0
 cat <<EOF
 
 Next: bootstrap a project with

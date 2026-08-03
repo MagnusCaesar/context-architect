@@ -7,6 +7,8 @@ failure-todos/open-questions graph. Dedupes against existing pending entries.
 import argparse, html, re, sys
 from pathlib import Path
 
+from context_utils import firstmate_root
+
 KINDS = {"decision", "failure", "open-question"}
 
 def _norm(s: str) -> str:
@@ -23,7 +25,7 @@ def existing_pending_summaries(content: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--inbox", required=True)
+    ap.add_argument("--inbox", default=str(firstmate_root() / "context" / "capture-inbox.html"))
     ap.add_argument("--summary", required=True)
     ap.add_argument("--kind", required=True, choices=sorted(KINDS))
     ap.add_argument("--source", default="")

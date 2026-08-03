@@ -9,30 +9,21 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from context_utils import (
-    add_active_lock,
+    acquire_page_lock,
     agent_role,
-    append_ledger_event,
-    context_mutex,
     find_context_root,
     has_permission,
-    MutexTimeout,
     permission_denied,
     read_config,
     read_meta,
-    remove_active_lock,
     resolve_context_page,
     repo_root,
-    set_meta_in_content,
     stale_tracks,
     tracks_status,
     write_atomic,
-    write_intent,
-    write_pid_sentinel,
-    contention_break_allowed,
 )
 from task_capsule import CapsuleError, build_capsule, record_receipt
 
@@ -109,142 +100,8 @@ def check_staleness(context_root: Path, page: str) -> dict:
     }
 
 
-def update_lock_meta(context_root: Path, page_path: Path, agent_id: str) -> None:
-    content = page_path.read_text(errors="replace")
-    now = datetime.now(timezone.utc).isoformat()
-    content = set_meta_in_content(content, "locked", "true")
-    content = set_meta_in_content(content, "locked-by", agent_id)
-    content = set_meta_in_content(content, "locked-at", now)
-    write_atomic(page_path, content, context_root=context_root)
-
-
-def lock_age_minutes(locked_at: str) -> float | None:
-    if not locked_at:
-        return None
-    try:
-        lock_time = datetime.fromisoformat(locked_at.replace("Z", "+00:00"))
-        if lock_time.tzinfo is None:
-            lock_time = lock_time.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-    return (datetime.now(timezone.utc) - lock_time).total_seconds() / 60
-
-
 def acquire_lock(context_root: Path, page: str, agent_id: str, intent: str = "") -> dict:
-    try:
-        ceiling = float(read_config(context_root).get("lockMutexTimeoutSec", 10))
-    except (TypeError, ValueError):
-        ceiling = 10.0
-    try:
-        with context_mutex(context_root, f"lock-{page}"):
-            return _acquire_lock(context_root, page, agent_id, intent)
-    except MutexTimeout:
-        return {
-            "status": "blocked_lock_busy",
-            "acquired": False,
-            "reason": f"lock mutex busy >{ceiling:g}s",
-        }
-
-
-# REVISIT[subagent-hook-inheritance]: Locking is HONOR-SYSTEM for subagents on Claude
-# Code 2.1.201 (verified 2026-07-06). No PreToolUse(Edit|Write) hook fires for Task
-# subagents, so nothing PREVENTS a subagent from editing a page locked by a sibling — it
-# is only discouraged by the CLAUDE.md instruction to run this script first. Subagents
-# also have no AGENT_ID by default; the orchestrator assigns one via the spawn prompt
-# (see the orchestrate skill). If a future version delivers inheritable per-tool hooks to
-# subagents, real enforcement becomes possible — re-run the subagent probe, then INFORM
-# THE USER before removing the manual path.
-def _acquire_lock(context_root: Path, page: str, agent_id: str, intent: str = "") -> dict:
-    page_path = resolve_context_page(context_root, page)
-    if not page_path.exists():
-        result = {
-            "status": "blocked_active_lock",
-            "acquired": False,
-            "reason": f"{page} does not exist",
-            "action": "orchestrator_resolution_required",
-        }
-        append_ledger_event(context_root, "acquire", page, agent_id, result["status"], result["reason"])
-        return result
-
-    current_lock = read_meta(page_path, "locked")
-    if current_lock == "true":
-        locked_by = read_meta(page_path, "locked-by")
-        # Same-owner re-acquire is a no-op success: acquiring a lock you already hold
-        # means "ensure I hold it", not contention. Without this, a same-agent second
-        # acquire falls through to the blocked-intent path and self-blocks. This is the
-        # subagent path (they call start-task.py directly; no PreToolUse hook pre-checks
-        # ownership for them — verified Claude Code 2.1.201).
-        # ponytail: on >=2.1.203 PreToolUse fires for subagents so auto-lock works via
-        # the hook; this manual same-owner path stays as the fallback for older CC and
-        # for direct script calls.
-        if locked_by == agent_id:
-            write_pid_sentinel(context_root, page)
-            result = {"status": "acquired", "acquired": True, "already_held": True}
-            append_ledger_event(context_root, "acquire", page, agent_id, "acquired", "already held by same agent")
-            return result
-        locked_at = read_meta(page_path, "locked-at")
-        config = read_config(context_root)
-        stale_after = int(config.get("staleLockMinutes", 30))
-        age = lock_age_minutes(locked_at)
-        if age is not None and age > stale_after:
-            if not has_permission(context_root, agent_id, "break_stale_lock"):
-                result = {
-                    "status": "blocked_active_lock",
-                    "acquired": False,
-                    "reason": f"stale lock held by {locked_by}; break requires orchestrator",
-                    "action": "orchestrator_resolution_required",
-                }
-                append_ledger_event(context_root, "acquire", page, agent_id, result["status"], result["reason"])
-                return result
-            update_lock_meta(context_root, page_path, agent_id)
-            remove_active_lock(context_root, page, locked_by)
-            add_active_lock(context_root, page, agent_id)
-            write_pid_sentinel(context_root, page)
-            result = {
-                "status": "broke_stale_lock",
-                "acquired": True,
-                "broke_stale": True,
-                "previous_owner": locked_by,
-            }
-            append_ledger_event(context_root, "acquire", page, agent_id, result["status"], f"previous_owner={locked_by}")
-            return result
-
-        # Contention-aware fast break: if owner's heartbeat is stale, take the lock
-        if locked_by != agent_id and contention_break_allowed(context_root, page, locked_by):
-            update_lock_meta(context_root, page_path, agent_id)
-            remove_active_lock(context_root, page, locked_by)
-            add_active_lock(context_root, page, agent_id)
-            write_pid_sentinel(context_root, page)
-            result = {
-                "status": "broke_stale_lock",
-                "acquired": True,
-                "broke_stale": True,
-                "previous_owner": locked_by,
-                "break_reason": "contention_heartbeat_stale",
-            }
-            append_ledger_event(context_root, "acquire", page, agent_id, "contention_break", f"previous_owner={locked_by}")
-            return result
-
-        # Write blocked intent for orchestrator to resolve
-        if intent:
-            write_intent(context_root, page, agent_id, intent, blocked=True)
-        result = {
-            "status": "blocked_active_lock",
-            "acquired": False,
-            "reason": f"locked by {locked_by} since {locked_at}",
-            "action": "orchestrator_resolution_required",
-        }
-        append_ledger_event(context_root, "acquire", page, agent_id, result["status"], result["reason"])
-        return result
-
-    update_lock_meta(context_root, page_path, agent_id)
-    add_active_lock(context_root, page, agent_id)
-    write_pid_sentinel(context_root, page)
-    if intent:
-        write_intent(context_root, page, agent_id, intent)
-    result = {"status": "acquired", "acquired": True}
-    append_ledger_event(context_root, "acquire", page, agent_id, result["status"], "lock acquired")
-    return result
+    return acquire_page_lock(context_root, page, agent_id, intent)
 
 
 def main():

@@ -9,7 +9,7 @@ justified.
 
 | Script | Stable output contract |
 |--------|------------------------|
-| `bootstrap.py` | JSON `status: error` for rejected inputs; scan/generate modes otherwise print structured findings or generation summary. Generate mode creates `context/` and upserts managed bootloader blocks in target `AGENTS.md` and `CLAUDE.md`. |
+| `bootstrap.py` | JSON `status: error` for rejected inputs; scan/generate modes otherwise print structured findings or generation summary. `--platform claude`, `codex`, or `both` selects managed `CLAUDE.md`, `AGENTS.md`, or both; ambiguous detection fails before writes. Generate and refresh preflight every selected managed block before mutation, and refresh reuses the platform stored in `context/config.json`. |
 | `start-task.py` | JSON `status`: `acquired`, `blocked_active_lock`, `broke_stale_lock`, `read_only`, `error`; also returns `task_class` where applicable. |
 | `close-task.py` | JSON `status`: `released`, `release_denied_wrong_owner`, `validation_warning`, `error`; validation warnings keep the lock. |
 | `check-freshness.py` | JSON `status`: `fresh`, `stale`, `untracked`, `unknown`, `error`. `unknown` means git/source state could not be proven. |

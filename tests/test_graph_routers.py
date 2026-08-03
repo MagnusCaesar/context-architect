@@ -91,7 +91,7 @@ def mutated_graph_fixture(tmp_path, mutation):
 def fresh_bootstrap(tmp_path, pages=None):
     target = tmp_path / "project"
     target.mkdir()
-    command = [sys.executable, str(BOOTSTRAP), "--target", str(target)]
+    command = [sys.executable, str(BOOTSTRAP), "--target", str(target), "--platform", "codex"]
     if pages:
         command.extend(["--pages-json", json.dumps(pages)])
     subprocess.run(command, check=True, capture_output=True, text=True)

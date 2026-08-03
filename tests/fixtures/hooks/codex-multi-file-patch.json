@@ -1,0 +1,11 @@
+{
+  "event_name": "PreToolUse",
+  "cwd": "/work/project",
+  "session_id": "codex-session",
+  "turn_id": "turn-2",
+  "agent_id": "agent-8",
+  "tool_name": "apply_patch",
+  "tool_input": {"command": "*** Begin Patch\n*** Add File: a.py\n+x = 1\n*** Update File: dir with space/b.py\n@@\n-old\n+new\n*** Delete File: old.py\n*** Update File: source.py\n*** Move to: moved.py\n*** End Patch\n"},
+  "permission_mode": "workspace-write",
+  "model": "gpt-test"
+}
