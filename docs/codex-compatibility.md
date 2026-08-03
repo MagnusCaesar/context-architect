@@ -33,11 +33,15 @@ A local 2026-08-02 probe observed project hooks on subagent lifecycle and child 
 | `Stop` / `SessionEnd` | not captured in bounded run | inconclusive |
 
 The fresh harness used temporary project hooks and temporary writable
-`CODEX_HOME`; host `auth.json` and `config.toml` were mounted read-only and not
+`HOME`/`CODEX_HOME` plus a minimal bubblewrap root containing system runtime
+directories, the exact Node/Codex installation, the temporary project, and
+read-only `auth.json`/`config.toml` mounts. It does not bind `/`; a sentinel
+proves every other host `~/.codex` path is inaccessible. Credentials are never
 copied. Both API-key environment variables were absent, and the isolated run
-was rejected by the Responses websocket with HTTP 401. Writable `~/.codex` was
-not used. The harness parses only stream event names and hook schema keys, and
-requires one `turn.completed`; an exit-zero error stream cannot pass.
+was rejected by the Responses websocket with HTTP 401. The harness records
+allowlisted schema keys only, redacts unknown key names, rejects any non-JSON
+stdout even beside `turn.completed`, and uses a Python stdlib process-group
+timeout. Writable `~/.codex` was not used.
 
 Subagent context isolation means a separate conversation thread, not a separate machine or checkout. Subagents still receive applicable system/project instructions. They share cwd and filesystem unless the orchestrator deliberately assigns a worktree. Therefore:
 
@@ -70,13 +74,15 @@ For Codex projects, that explicit refresh queries the catalog. A role changes on
 
 Automated fixtures verify event normalization, managed config merge, edit/lock gates, bounded diagnostics, capsule privacy, Firstmate privacy, model pagination/fallback/rollback, and platform-specific bootstrap. Real linked-worktree tests verify canonical shared state and copied/malformed locator rejection.
 
-Fresh 2026-08-02 results: `231` pytest tests passed; `101` smoke checks passed;
+Fresh 2026-08-02 results: `232` pytest tests passed; `101` smoke checks passed;
 all Python scripts compiled; `7` shell hook/test/script files passed `bash -n`;
 the linked-worktree lifecycle E2E passed; and deterministic hook adversaries
 passed. Those adversaries cover unrelated-hook preservation, multi-file
 unowned-path denial, malformed-edit fail-closed behavior, bounded diagnostic
-spill, one-time child continuation on validation failure, bounded capsule
-privacy, corrupt-catalog rollback, and the generated Luna-to-Terra/low fallback.
+spill, race-safe one-time child continuation on validation failure, bounded
+capsule privacy, corrupt-catalog rollback, hostile Git configuration/hooks,
+portable timeout behavior, real history mutation, and the generated
+Luna-to-Terra/low fallback.
 Manual Claude Code E2E was outside this Codex-only gate and was not run.
 
 Not verified as a durable guarantee:

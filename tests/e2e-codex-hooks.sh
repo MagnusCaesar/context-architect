@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+HOST_HOME=$HOME
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/contarch-codex-hooks.XXXXXX")
 cleanup() {
   if [ "${CONTARCH_KEEP_TMP:-0}" = 1 ]; then
@@ -14,11 +15,23 @@ trap cleanup EXIT
 PROJECT="$TMP/project"
 STATE="$TMP/codex-home"
 LOG="$PROJECT/hook-schema.ndjson"
-mkdir -p "$PROJECT/.codex" "$STATE"
+HOME="$TMP/home"
+export HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+mkdir -p "$PROJECT/.codex" "$STATE" "$HOME/hostile-hooks"
+cat >"$HOME/.gitconfig" <<EOF
+[commit]
+    gpgSign = true
+[core]
+    hooksPath = $HOME/hostile-hooks
+EOF
+printf '#!/bin/sh\nexit 99\n' >"$HOME/hostile-hooks/pre-commit"
+chmod +x "$HOME/hostile-hooks/pre-commit"
 
 git -C "$PROJECT" init -b main >/dev/null
-git -C "$PROJECT" config user.email e2e@example.invalid
-git -C "$PROJECT" config user.name "contarch e2e"
+git -C "$PROJECT" config --local user.email e2e@example.invalid
+git -C "$PROJECT" config --local user.name "contarch e2e"
+git -C "$PROJECT" config --local commit.gpgSign false
+git -C "$PROJECT" config --local core.hooksPath /dev/null
 git -C "$PROJECT" commit --allow-empty -m base >/dev/null
 
 cat >"$PROJECT/sanitize-hook.py" <<'PY'
@@ -41,10 +54,19 @@ tool = payload.get("tool_name") or payload.get("tool") or ""
 tool = tool if tool in {"Bash", "apply_patch", "Edit", "Write", "Read"} else "other"
 model = payload.get("model") or ""
 model = model if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", model) else ""
+known_payload = {
+    "agent_id", "agentId", "agent_type", "cwd", "event_name", "expected_result",
+    "hook_event_name", "last_assistant_message", "model", "permission_mode", "prompt",
+    "result", "role", "scope", "session_id", "sessionId", "task", "tool", "tool_input",
+    "tool_name", "turn_id", "turnId",
+}
+known_tool_input = {"command", "file_path", "links", "path", "result", "scope", "task"}
 record = {
     "event": event,
-    "keys": sorted(str(key) for key in payload),
-    "tool_input_keys": sorted(str(key) for key in tool_input),
+    "keys": sorted(key for key in payload if key in known_payload),
+    "tool_input_keys": sorted(key for key in tool_input if key in known_tool_input),
+    "unknown_keys": {"count": sum(key not in known_payload for key in payload), "names": "redacted"},
+    "unknown_tool_input_keys": {"count": sum(key not in known_tool_input for key in tool_input), "names": "redacted"},
     "tool": tool,
     "child": bool(payload.get("agent_id") or payload.get("agentId")),
     "model": model,
@@ -73,8 +95,57 @@ for line in sys.stdin:
     if isinstance(payload, dict):
         counts[str(payload.get("type") or "unknown")] += 1
 Path(sys.argv[1]).write_text(json.dumps({"events": counts, "invalid": invalid}, sort_keys=True) + "\n")
+raise SystemExit(1 if invalid else 0)
 PY
 chmod +x "$PROJECT/sanitize-codex-stream.py"
+
+cat >"$PROJECT/run-with-timeout.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import sys
+
+seconds = float(sys.argv[1])
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    raise SystemExit(process.wait(timeout=seconds))
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    raise SystemExit(124)
+PY
+chmod +x "$PROJECT/run-with-timeout.py"
+
+printf '%s\n' '{"type":"turn.completed"}' 'not-json' \
+  | if python3 "$PROJECT/sanitize-codex-stream.py" "$TMP/invalid-stream.json"; then
+      echo "invalid Codex stream was accepted" >&2
+      exit 1
+    fi
+printf '%s\n' '{"api_secret_name":"hidden","tool_input":{"password_field":"hidden"}}' \
+  | python3 "$PROJECT/sanitize-hook.py" SecretProbe "$TMP/sanitizer-test.ndjson" >/dev/null
+SANITIZER_TEST="$TMP/sanitizer-test.ndjson" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+text = Path(os.environ["SANITIZER_TEST"]).read_text()
+assert "api_secret_name" not in text and "password_field" not in text
+record = json.loads(text)
+assert record["unknown_keys"] == {"count": 1, "names": "redacted"}
+assert record["unknown_tool_input_keys"] == {"count": 1, "names": "redacted"}
+PY
+PYTHON_BIN=$(command -v python3)
+set +e
+PATH="$TMP/no-timeout" "$PYTHON_BIN" "$PROJECT/run-with-timeout.py" 0.05 \
+  "$PYTHON_BIN" -c 'import time; time.sleep(5)'
+TIMEOUT_STATUS=$?
+set -e
+[ "$TIMEOUT_STATUS" -eq 124 ]
 
 PROJECT="$PROJECT" LOG="$LOG" python3 - <<'PY'
 import json
@@ -153,9 +224,14 @@ spill = context / message.removeprefix("Diagnostic written: ")
 assert spill.is_file() and spill.stat().st_size > 800
 first_stop = dispatch("SubagentStop", {"cwd": str(project), "agent_id": "child"})
 assert first_stop.get("continue") is True
-validator.write_bytes(original)
 second_stop = dispatch("SubagentStop", {"cwd": str(project), "agent_id": "child"})
 assert "continue" not in second_stop
+assert subprocess.run(
+    ["git", "check-ignore", "-q", "context/.hook-state/subagent-stop.json"], cwd=project
+).returncode == 0
+validator.write_bytes(original)
+repaired_stop = dispatch("SubagentStop", {"cwd": str(project), "agent_id": "child"})
+assert "continue" not in repaired_stop
 
 profiles = sorted((project / ".codex/agents").glob("*.toml"))
 before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in profiles}
@@ -184,27 +260,51 @@ if ! command -v codex >/dev/null 2>&1; then
   exit 0
 fi
 
+if ! command -v bwrap >/dev/null 2>&1; then
+  echo "live Codex hooks: SKIP (bubblewrap unavailable; host data remains hidden)"
+  exit 0
+fi
+
+AUTH_BIND=()
 if [ -n "${OPENAI_API_KEY:-}" ]; then
-  LIVE=(env CODEX_HOME="$STATE")
-elif command -v bwrap >/dev/null 2>&1 && [ -f "$HOME/.codex/auth.json" ]; then
+  : # API key stays in the inherited environment; HOME and CODEX_HOME are temporary.
+elif [ -f "$HOST_HOME/.codex/auth.json" ]; then
   touch "$STATE/auth.json"
-  CONFIG_BIND=()
-  if [ -f "$HOME/.codex/config.toml" ]; then
+  AUTH_BIND=(--ro-bind "$HOST_HOME/.codex/auth.json" "$STATE/auth.json")
+  if [ -f "$HOST_HOME/.codex/config.toml" ]; then
     touch "$STATE/config.toml"
-    CONFIG_BIND=(--ro-bind "$HOME/.codex/config.toml" "$STATE/config.toml")
+    AUTH_BIND+=(--ro-bind "$HOST_HOME/.codex/config.toml" "$STATE/config.toml")
   fi
-  LIVE=(bwrap --ro-bind / / --dev-bind /dev /dev --proc /proc --bind "$TMP" "$TMP"
-        --ro-bind "$HOME/.codex/auth.json" "$STATE/auth.json" "${CONFIG_BIND[@]}"
-        --setenv CODEX_HOME "$STATE"
-        --chdir "$PROJECT")
 else
   echo "live Codex hooks: SKIP (no isolated credential path; global state left untouched)"
   exit 0
 fi
 
+NODE_BIN=$(readlink -f "$(command -v node)")
+CODEX_ENTRY=$(readlink -f "$(command -v codex)")
+case "$CODEX_ENTRY" in
+  */bin/codex.js) CODEX_SCOPE=${CODEX_ENTRY%/codex/bin/codex.js} ;;
+  *) echo "live Codex hooks: SKIP (unrecognized Codex installation; host data remains hidden)"; exit 0 ;;
+esac
+RUNTIME_BINDS=()
+for source in /usr /bin /lib /lib64 /etc/alternatives /etc/crypto-policies /etc/pki /etc/ssl /etc/resolv.conf /etc/hosts /etc/nsswitch.conf /etc/passwd /etc/group; do
+  [ ! -e "$source" ] || RUNTIME_BINDS+=(--ro-bind "$source" "$source")
+done
+LIVE=(bwrap --die-with-parent --new-session "${RUNTIME_BINDS[@]}"
+      --ro-bind "$NODE_BIN" "$NODE_BIN" --ro-bind "$CODEX_SCOPE" "$CODEX_SCOPE"
+      --proc /proc --dev /dev --dir /tmp --bind "$TMP" "$TMP" "${AUTH_BIND[@]}"
+      --setenv HOME "$HOME" --setenv CODEX_HOME "$STATE" --chdir "$PROJECT")
+CONTARCH_HOST_SENTINEL="$HOST_HOME/.codex/AGENTS.md" "${LIVE[@]}" /usr/bin/python3 - <<'PY'
+import os
+from pathlib import Path
+
+assert not Path(os.environ["CONTARCH_HOST_SENTINEL"]).exists()
+PY
+
 PROMPT='Lifecycle test. Use Bash once to create parent-bash.txt. Use apply_patch once to add parent-patch.txt. Spawn exactly one economy subagent; tell it to use Bash once and apply_patch once to create child-bash.txt and child-patch.txt, then wait for it. Do not inspect hook logs, transcripts, or global files. End with done.'
 set +e
-timeout "${CONTARCH_CODEX_TIMEOUT:-240}s" "${LIVE[@]}" codex exec --ephemeral \
+"$PYTHON_BIN" "$PROJECT/run-with-timeout.py" "${CONTARCH_CODEX_TIMEOUT:-240}" \
+  "${LIVE[@]}" "$NODE_BIN" "$CODEX_ENTRY" exec --ephemeral \
   --dangerously-bypass-hook-trust --sandbox workspace-write --json --color never \
   -C "$PROJECT" "$PROMPT" 2>"$TMP/codex-stderr" \
   | python3 "$PROJECT/sanitize-codex-stream.py" "$TMP/codex-stream-status.json"

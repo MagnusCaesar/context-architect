@@ -533,12 +533,13 @@ def refresh_context(target: Path, platforms) -> dict:
     # Ensure .gitignore has .locks/
     ctx_gitignore = context_dir / ".gitignore"
     if not ctx_gitignore.exists():
-        write_atomic(ctx_gitignore, ".locks/\nledger-archive/\n", context_root=context_dir)
+        write_atomic(ctx_gitignore, ".locks/\n.hook-state/\nledger-archive/\n", context_root=context_dir)
         updated.append(".gitignore")
     else:
         gi_content = ctx_gitignore.read_text()
-        if ".locks/" not in gi_content:
-            write_atomic(ctx_gitignore, gi_content.rstrip() + "\n.locks/\n", context_root=context_dir)
+        missing = [entry for entry in (".locks/", ".hook-state/") if entry not in gi_content]
+        if missing:
+            write_atomic(ctx_gitignore, gi_content.rstrip() + "\n" + "\n".join(missing) + "\n", context_root=context_dir)
             updated.append(".gitignore")
 
     # Merge missing self-healing config keys (preserve existing values)
@@ -722,11 +723,12 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
     # Create .gitignore for .locks/ (ephemeral sentinels)
     ctx_gitignore = context_dir / ".gitignore"
     if not ctx_gitignore.exists():
-        write_atomic(ctx_gitignore, ".locks/\nledger-archive/\n", context_root=context_dir)
+        write_atomic(ctx_gitignore, ".locks/\n.hook-state/\nledger-archive/\n", context_root=context_dir)
     else:
         gi_content = ctx_gitignore.read_text()
-        if ".locks/" not in gi_content:
-            write_atomic(ctx_gitignore, gi_content.rstrip() + "\n.locks/\n", context_root=context_dir)
+        missing = [entry for entry in (".locks/", ".hook-state/") if entry not in gi_content]
+        if missing:
+            write_atomic(ctx_gitignore, gi_content.rstrip() + "\n" + "\n".join(missing) + "\n", context_root=context_dir)
 
     # Generate config.json
     config_data = config or {

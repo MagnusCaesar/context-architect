@@ -2,6 +2,7 @@ import json
 import shlex
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -142,10 +143,29 @@ def test_subagent_stop_continues_only_when_validation_concretely_fails(tmp_path)
     scripts.mkdir()
     validator = scripts / "validate.py"
     validator.write_text("import argparse\nargparse.ArgumentParser().parse_args()\n")
-    event = normalize_event("SubagentStop", {})
+    event = normalize_event("SubagentStop", {"session_id": "session-a", "agent_id": "agent-a"})
     assert not dispatch(event, tmp_path).continue_
     validator.write_text("raise SystemExit(1)\n")
     assert dispatch(event, tmp_path).continue_
+    assert not dispatch(event, tmp_path).continue_
+    state = tmp_path / ".hook-state/subagent-stop.json"
+    assert state.stat().st_mode & 0o777 == 0o600
+    assert "session-a" not in state.read_text() and "agent-a" not in state.read_text()
+
+    other = normalize_event("SubagentStop", {"session_id": "session-a", "agent_id": "agent-b"})
+    assert dispatch(other, tmp_path).continue_
+
+
+def test_subagent_stop_continue_once_is_race_safe(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "validate.py").write_text("raise SystemExit(1)\n")
+    event = normalize_event("SubagentStop", {"session_id": "race-session", "agent_id": "race-agent"})
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: dispatch(event, tmp_path).continue_, range(8)))
+
+    assert results.count(True) == 1
 
 
 def test_post_edit_runs_shared_freshness_check_for_source_paths(tmp_path):

@@ -19,11 +19,13 @@ from context_utils import (
     acquire_page_lock,
     append_capture_candidate,
     canonical_context_root,
+    context_mutex,
     read_config,
     read_ledger_events,
     read_meta,
     registered_projects,
     tracks_status,
+    write_atomic,
 )
 from task_capsule import CapsuleError, build_capsule, record_receipt, restore_capsule
 
@@ -268,6 +270,37 @@ def _validation_failure(context_root: Path) -> str:
     return ""
 
 
+def _continue_subagent_once(event: Event, context_root: Path, failure: str) -> bool:
+    if not failure:
+        return False
+    identity = hashlib.sha256(
+        f"{event.session_id.strip() or 'session'}\0{event.agent_id.strip() or 'agent'}".encode()
+    ).hexdigest()
+    state_dir = context_root / ".hook-state"
+    state_file = state_dir / "subagent-stop.json"
+    try:
+        with context_mutex(context_root, "hook-subagent-stop"):
+            state_dir.mkdir(mode=0o700, exist_ok=True)
+            try:
+                state = json.loads(state_file.read_text()) if state_file.exists() else {}
+            except (OSError, json.JSONDecodeError):
+                return False
+            continued = state.get("continued", []) if isinstance(state, dict) else []
+            continued = continued if isinstance(continued, list) else []
+            if identity in continued:
+                return False
+            continued.append(identity)
+            write_atomic(
+                state_file,
+                json.dumps({"version": 1, "continued": continued}, sort_keys=True) + "\n",
+                context_root=context_root,
+            )
+            state_file.chmod(0o600)
+            return True
+    except (MutexTimeout, OSError):
+        return False
+
+
 def _freshness_update(context_root: Path) -> str:
     script = context_root / "scripts" / "check-freshness.py"
     if not script.exists():
@@ -486,7 +519,7 @@ def dispatch(event: Event, context_root) -> Result:
         return Result(context=capsule.text)
     if event.name == "SubagentStop":
         failure = _validation_failure(root)
-        return Result(context=failure, continue_=bool(failure))
+        return Result(context=failure, continue_=_continue_subagent_once(event, root, failure))
     if event.name in {"Stop", "SessionEnd"}:
         # Stop owns candidate capture. SessionEnd never opens transcript_path and
         # only accepts an explicit documented last_assistant_message.

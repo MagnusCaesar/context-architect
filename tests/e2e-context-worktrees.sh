@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/contarch-worktrees.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
+HOME="$TMP/home"
+export HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+mkdir -p "$HOME/hostile-hooks"
+cat >"$HOME/.gitconfig" <<EOF
+[commit]
+    gpgSign = true
+[core]
+    hooksPath = $HOME/hostile-hooks
+EOF
+printf '#!/bin/sh\nexit 99\n' >"$HOME/hostile-hooks/pre-commit"
+chmod +x "$HOME/hostile-hooks/pre-commit"
 
 export CONTARCH_ROOT="$ROOT"
 export CONTARCH_TMP="$TMP"
@@ -26,8 +37,10 @@ def git(*args, cwd=main):
     return run("git", *args, cwd=cwd).stdout.strip()
 
 git("init", "-b", "main")
-git("config", "user.email", "e2e@example.invalid")
-git("config", "user.name", "contarch e2e")
+git("config", "--local", "user.email", "e2e@example.invalid")
+git("config", "--local", "user.name", "contarch e2e")
+git("config", "--local", "commit.gpgSign", "false")
+git("config", "--local", "core.hooksPath", "/dev/null")
 git("commit", "--allow-empty", "-m", "base")
 run(sys.executable, str(root / "scripts/bootstrap.py"), "--target", str(main), "--platform", "codex")
 git("worktree", "add", "-b", "linked", str(linked))
@@ -66,6 +79,27 @@ receipt_id = receipts[-1]["receipt_id"]
 restored, _restored_receipt = restore_capsule(linked_context, receipt_id)
 assert restored.text == capsule
 
+terminal = main_context / "failure-todos/archived/fail-e2e-history.html"
+terminal.write_text('''<!doctype html><html><head>
+<meta name="title" content="E2E history proof">
+<meta name="created" content="2026-08-02">
+<meta name="updated" content="2026-08-02">
+<meta name="locked" content="false">
+<meta name="locked-by" content="">
+<meta name="locked-at" content="">
+<meta name="read-when" content="verifying history">
+<meta name="update-when" content="resolved proof changes">
+<meta name="tracks" content="context-only">
+<meta name="contract-version" content="2">
+<meta name="node-id" content="fail-e2e-history">
+<meta name="kind" content="failure">
+<meta name="status" content="resolved">
+<meta name="archived-at" content="2026-08-02T00:00:00Z">
+</head><body><article data-statement="Resolved E2E history proof.">
+<p class="statement">Resolved E2E history proof.</p></article></body></html>''')
+history = main_context / "history.html"
+history_before = history.read_bytes() if history.exists() else b""
+
 router = main_context / "decisions.html"
 original = router.read_text()
 router.write_text(original.replace(
@@ -85,10 +119,13 @@ closed = json.loads(run(
     sys.executable, str(close), "--page", "wiki.html", "--summary", "shared lifecycle verified",
     "--agent-id", "agent-main", cwd=main,
 ).stdout)
-assert closed["status"] == "released"
+assert closed["status"] == "released", closed
+assert closed["summary"] == "shared lifecycle verified"
 assert read_meta(linked_context / "wiki.html", "locked") == "false"
-history = main_context / "history.html"
-assert history.exists() and history.resolve() == (linked_context / "history.html").resolve()
+main_history = (main_context / "history.html").read_bytes()
+linked_history = (linked_context / "history.html").read_bytes()
+assert main_history != history_before and main_history == linked_history
+assert b"fail-e2e-history" in main_history and b"failure resolved" in main_history
 events = read_ledger_events(linked_context)
 assert any(event.get("page") == "wiki.html" and event.get("status") == "released" for event in events)
 
