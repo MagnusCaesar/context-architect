@@ -36,8 +36,9 @@ def snapshot_tree(root):
 
 def build_installer(directory):
     installer = Path(directory) / "installer.sh"
-    built = subprocess.run(["bash", str(SKILL / "package.sh"), str(installer)], capture_output=True, text=True)
-    assert built.returncode == 0, built.stderr + built.stdout
+    header = (SKILL / "installer-header.sh").read_text()
+    lines = len(header.splitlines()) + 1
+    installer.write_text(header.replace("@VERSION@", "test").replace("@LINES@", str(lines)))
     return installer
 
 

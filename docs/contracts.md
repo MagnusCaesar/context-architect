@@ -1,5 +1,7 @@
 # Context Architecture Contracts
 
+Codex version, hook/subagent observations, model availability, and known gaps are tracked in [compatibility](compatibility.md); this file remains the harness-neutral behavioral authority.
+
 This file defines script-owned contracts for the lean V1 context architecture.
 Scripts report facts and enforce structure. The orchestrator resolves judgment:
 blocked locks, stale context, unmatched files, and whether new durable pages are

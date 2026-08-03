@@ -1,173 +1,115 @@
 # context-architect
 
-Deterministic repo-local context architecture for Codex, Claude Code, and other coding agents.
+Deterministic, repo-local context architecture for Codex and Claude Code. Scripts own routing, locks, receipts, and validation; models see only the small task context needed for current work.
 
-This project is both:
+## Quick start
 
-- a Codex skill, via `SKILL.md`
-- a one-time bootstrapper that installs repo-local agent instructions and a `context/` control plane into target repositories
-
-The core rule is simple: scripts own routine mechanics; agents own judgment. Humans invoke the skill once; bootstrap writes `AGENTS.md`/`CLAUDE.md` into the target repo, and future agents follow those local instructions.
-
-## Use
-
-Install this repository as a Codex skill:
+Install as a Codex skill from a checkout:
 
 ```bash
 git clone git@github.com:MagnusCaesar/context-architect.git ~/.codex/skills/context-architecture
 ```
 
-For development, symlink a working checkout instead:
+Or use a tagged self-extractor:
 
 ```bash
-git clone git@github.com:MagnusCaesar/context-architect.git /path/to/context-architecture
-ln -s /path/to/context-architecture ~/.codex/skills/context-architecture
+sh contarch-vX.Y.Z.sh --platform codex
+# also accepted: --platform claude | --platform both
 ```
 
-Strongly install context-mode too. It keeps large command output, file analysis, web fetches, and indexed search from flooding the model context window:
-
-https://github.com/mksglu/context-mode
-
-Then start a fresh Codex session and ask for the skill:
+Start a fresh session, then bootstrap explicitly:
 
 ```text
-$context-architecture bootstrap this repo
+Use $context-architecture to bootstrap this repo for Codex.
 ```
 
-or:
+Equivalent maintainer commands:
 
-```text
-Use $context-architecture to add deterministic context architecture to /path/to/project
+```bash
+python3 scripts/bootstrap.py --target /path/to/project --platform codex
+python3 scripts/bootstrap.py --target /path/to/project --platform claude
+python3 scripts/bootstrap.py --target /path/to/project --platform both
 ```
 
-After bootstrap, stop invoking this skill for routine work. Open future Codex,
-Claude, or other agent sessions normally in the target repo; the generated
-`AGENTS.md` and `CLAUDE.md` tell agents to use `context/index.html` and run the
-local deterministic scripts themselves.
+`--scan` is read-only inventory. `--refresh` upgrades managed files without touching locks, heartbeats, or ledger history. Existing authored text outside managed markers stays byte-for-byte unchanged.
 
-What gets installed into a target repo:
+## Feature matrix
+
+| Feature | Claude Code | Codex | Verification |
+|---|---:|---:|---|
+| Explicit single/dual-platform bootstrap | Yes | Yes | Verified: platform fixtures + smoke |
+| Managed lifecycle hook dispatcher | Yes | Yes | Verified: schema fixtures; live boundary below |
+| Wiki, decision, failure, and workstream graphs | Yes | Yes | Verified: parser/validator fixtures |
+| HEAD-only routers and root-index BFS discoverability | Yes | Yes | Verified: pass/fail graph fixtures |
+| Deterministic archived history and head-consolidation proposals | Yes | Yes | Verified: hygiene fixtures; proposals never auto-mutate |
+| One canonical context root shared by Git worktrees | Yes | Yes | Verified: real linked-worktree fixtures |
+| Bounded task capsules and hash-backed receipts | Yes | Yes | Verified: adversarial capsule/restore fixtures |
+| Mutex, append-only ledger, source claims, and agent tree | Yes | Yes | Verified: concurrency and stale-owner fixtures |
+| Private global Firstmate inbox and project registry | Yes | Yes | Verified: lifecycle/privacy fixtures |
+| Semantic lead/balanced/economy model policy | Native Claude choice unchanged | Sol/Terra/Luna policy | Verified: catalog, fallback, conflict, rollback fixtures |
+| Tagged self-extractor for one or both harnesses | Yes | Yes | Verified: clean-tag, payload, archive, checksum tests |
+
+Verified means automated repository tests unless the compatibility page labels a dated local CLI probe. Not verified: every future Codex/Claude release, every plugin combination, remote sandbox policy, and third-party wrapper behavior. See [compatibility](docs/compatibility.md) for exact evidence and gaps; [contracts](docs/contracts.md) remain behavioral authority.
+
+## What bootstrap creates
 
 ```text
-AGENTS.md                    # Agent bootloader with managed context block
-CLAUDE.md                    # Claude bootloader with managed context block
+AGENTS.md / CLAUDE.md            managed harness entry points
 context/
-├── index.html              # Map-first retrieval router
-├── control-plane.html      # Runtime checklist
-├── ledger-events.ndjson    # Append-only event source
-├── ledger.html             # Active locks/source claims + bounded event view
-├── agent-tree.html         # Advisory active agent subtree
-├── decisions.html          # Decision graph router
-├── decisions/              # One-file-per-decision nodes + archive
-├── failure-todos.html      # Scoped failure router
-├── failure-todos/          # One-file-per-failure nodes + archive
-├── open-questions.html     # Unresolved question router
-├── open-questions/         # One-file-per-question nodes + archive
-├── recognized-commits.html # Git range/context sync metadata
-├── reproducibility.html    # Setup/env/path facts
-├── run-intent.html         # Intent-to-runbook router
-├── runbooks/               # Mini skill/how-to command pages
-├── config.json             # Repo roots, roles, validator settings
-├── scripts/                # Deterministic tools copied from this repo
-├── hooks/                  # Optional runtime hooks
-├── archived/               # Copies of absorbed docs
-├── runtime-policy.md       # OS/sandbox hardening guidance
-└── *.html                  # Project context pages
-docs/
-└── context/                # Generated human-facing projection
+├── index.html                  sole graph discoverability root
+├── wiki.html + wiki/           concise durable facts
+├── decisions.html + decisions/ HEAD decisions and their descendants
+├── failure-todos.html + failure-todos/
+├── workstreams.html + workstreams/
+├── open-questions.html + open-questions/  compatibility graph
+├── control-plane.html
+├── ledger-events.ndjson        append-only events and capsule receipts
+├── ledger.html                 active locks/source claims
+├── agent-tree.html
+├── config.json
+├── scripts/ and hooks/         deterministic runtime control plane
+├── archived/                   absorbed source documents
+└── runtime-policy.md
+docs/context/                   generated human-readable projection
 ```
 
-The HTML files are the source of truth. Markdown under `docs/context/` is generated for humans.
+Router pages contain only graph heads. Descendants, history, and supporting detail live in linked node/files, keeping entry cost bounded. Every live page must be reachable from `context/index.html`.
 
-Boundary with context-mode:
+## Firstmate and model roles
 
-- context-mode handles low-context tool execution, indexed retrieval, web/doc fetch indexing, and session-memory search.
-- context-architect handles page-local `tracks`, diff-to-page routing, locks, ledger events, agent tree, decisions, reachability/orphan checks, permissions, and generated `context/` structure.
+Global Firstmate state defaults to `${XDG_DATA_HOME:-$HOME/.local/share}/context-architecture/firstmate`; override with `CONTEXT_ARCH_FIRSTMATE`. It stores cross-project suggestions privately and exposes only registry allowlist fields to project routing.
 
-Treat them as complementary. Do not replace deterministic framework scripts with semantic search results.
+Codex roles default to:
+
+| Semantic role | Desired model | Effort | Direct-spawn actual |
+|---|---|---:|---|
+| lead (Opus-equivalent) | `gpt-5.6-sol` | high | Sol/high |
+| balanced (Sonnet-equivalent) | `gpt-5.6-terra` | medium | Terra/medium |
+| economy (Haiku-equivalent) | `gpt-5.6-luna` | medium | Terra/low when direct Luna override is rejected; profile discloses both |
+
+Model discovery is fail-closed and changes only during explicit Codex `--refresh`. See [compatibility](docs/compatibility.md).
 
 ## Development
 
-This section is for maintaining this framework or debugging the installed scripts directly.
-
-Authoritative files:
-
-- `SKILL.md`: Codex skill instructions
-- `docs/contracts.md`: status fields, schemas, metadata contracts, memory boundaries
-- `scripts/`: deterministic implementation
-- `templates/`: generated target defaults
-- `hooks/`: optional hook helpers
-- `agents/openai.yaml`: Codex UI metadata
-- `smoke.sh`: integration and contract smoke coverage
-- `AGENTS.md` and `CLAUDE.md`: maintainer instructions for this framework repo only; target repos get their own generated managed blocks
-
-Bootstrap a target repo manually:
+Core commands:
 
 ```bash
 python3 scripts/bootstrap.py --target /path/to/project --scan
-python3 scripts/bootstrap.py --target /path/to/project
-python3 scripts/bootstrap.py --target /path/to/project --absorb-docs
-```
-
-Use explicit page input when the scan is not enough:
-
-```bash
-python3 scripts/bootstrap.py --target /path/to/project --config /path/to/pages.json
-python3 scripts/bootstrap.py --target /path/to/project --pages-json '[{"name":"parser.html","purpose":"Parser context"}]'
-```
-
-`--scan` is inventory-only and does not write files. `--absorb-docs` imports headed docs, copies originals under `context/archived/`, links the new pages, and avoids semantic page generation.
-
-Manual target-repo lifecycle commands:
-
-These are the commands generated bootloader files tell future agents to run.
-Humans usually run them only for debugging, CI, or non-agent operation.
-
-```bash
-python3 context/scripts/start-task.py --page parser.html --intent "fix parser timing docs"
-python3 context/scripts/start-task.py --page parser.html --intent "audit parser context" --read-only
-python3 context/scripts/route-diff.py --files src/parser.py
-python3 context/scripts/route-diff.py --from HEAD~1 --to HEAD
-python3 context/scripts/check-freshness.py --json
-python3 context/scripts/check-freshness.py --page parser.html --json
-python3 context/scripts/update-tracks.py --page parser.html --add src/parser.py --remove src/old_parser.py
-python3 context/scripts/record-agent.py --agent-id worker-1 --parent-id orchestrator --role verifier --task "validate parser" --page parser.html --status spawned --actor-id orchestrator
-python3 context/scripts/check-reachability.py --json
-python3 context/scripts/daily-hygiene.py --json
-python3 context/scripts/close-task.py --page parser.html --summary "updated parser context"
-python3 context/scripts/validate.py
-python3 context/scripts/generate-docs.py
-```
-
-Daily hygiene also auto-runs once per local day before the first non-`daily_hygiene` ledger event; manual runs are for explicit reports.
-
-Permission profiles are workflow enforcement, not an OS sandbox. Scripts enforce roles from `context/config.json`:
-
-- `orchestrator`: lock arbitration, stale lock break, track repair, any-agent records
-- `worker`: acquire free locks, release own locks, record itself
-- `readonly`: read-only checks only
-
-Unknown agents default to `readonly`.
-
-For stronger ledger protection on Linux, run hardening outside the agent runtime as root, an elevated user, or another Unix user that the agent cannot control:
-
-```bash
-context/scripts/harden-ledger.sh context
-python3 context/scripts/check-hardening.py --json
-```
-
-If the same agent can run `chattr -a`, `chmod`, or arbitrary writes to protected files, hardening is advisory only. See generated `context/runtime-policy.md`.
-
-Validation:
-
-```bash
-python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" .
-python3 -m py_compile scripts/*.py
+python3 scripts/bootstrap.py --target /path/to/project --absorb-docs --platform both
+python3 scripts/bootstrap.py --target /path/to/project --refresh
+python3 -m pytest -q
 bash smoke.sh
-git diff --check
+python3 scripts/release-verify.py
 ```
 
-The smoke test exercises bootstrap/generation, path traversal rejection, unknown-agent permission denial, lock contention, stale lock break, daily hygiene auto-run, route/freshness, track repair/no-op, reachability/hygiene, hardening status, agent lifecycle logging, decision validation, atomic writes, read-only start-task, close validation warnings, and docs generation.
+Target-repo lifecycle commands live in generated bootloaders and [contracts](docs/contracts.md). HTML under `context/` is authoritative; Markdown under `docs/context/` is generated. Context-mode is recommended for low-context command/file/web processing, but semantic search never replaces deterministic graph validation.
 
-Design history:
+Build a release only after adding an exact changelog heading, committing it, and tagging that commit:
 
-`context-architecture-replication-report-2026-06-05.md` is a deprecated historical initial reference. It explains early design exploration, but current behavior is defined by `SKILL.md`, `docs/contracts.md`, scripts, templates, and tests.
+```bash
+./package.sh vX.Y.Z
+```
+
+Packaging rejects dirty/untracked trees and tags not exactly at `HEAD`; payload comes only from `git archive <tag>`.
+
+`context-architecture-replication-report-2026-06-05.md` is historical exploration, not current authority.
