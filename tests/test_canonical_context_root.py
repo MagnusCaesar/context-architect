@@ -113,6 +113,26 @@ def test_linked_worktree_copy_is_never_selected(tmp_path, monkeypatch):
     assert find_context_root() == main / "context"
 
 
+def test_generate_docs_ignores_linked_worktree_context_copy(tmp_path):
+    main, linked, _ = git_project(tmp_path)
+    canonical_page = main / "context" / "canonical-only.html"
+    canonical_page.write_text("<html><body><h1>Canonical only</h1></body></html>")
+    copied = linked / "context"
+    copied.mkdir()
+    (copied / "index.html").write_text("<html><body><h1>Copied</h1></body></html>")
+
+    subprocess.run(
+        [sys.executable, str(main / "context" / "scripts" / "generate-docs.py")],
+        cwd=linked,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (main / "docs" / "context" / "canonical-only.md").exists()
+    assert not (linked / "docs" / "context").exists()
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [

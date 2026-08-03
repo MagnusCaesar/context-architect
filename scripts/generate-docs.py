@@ -13,7 +13,7 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
-from context_utils import generate_history
+from context_utils import find_context_root, generate_history
 
 
 class HTMLToMarkdown(HTMLParser):
@@ -181,16 +181,6 @@ def convert_file(html_path: Path) -> str:
         md += f"\n---\n*See also: {', '.join(footer_links)}*\n"
 
     return md
-
-
-def find_context_root():
-    cwd = Path.cwd()
-    for parent in [cwd] + list(cwd.parents):
-        if (parent / "context" / "index.html").exists():
-            return parent / "context"
-    if (cwd / "index.html").exists():
-        return cwd
-    return None
 
 
 def main():
