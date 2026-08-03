@@ -146,6 +146,31 @@ def test_bootstrap_stores_platform_and_refresh_uses_it_without_detection():
         assert "new session required" in refreshed.stdout.lower()
 
 
+def test_bootstrap_and_refresh_remove_unsupported_auto_commit_flag():
+    bootstrap = SCRIPTS / "bootstrap.py"
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        created = subprocess.run(
+            [sys.executable, str(bootstrap), "--target", str(target), "--platform", "claude"],
+            capture_output=True,
+            text=True,
+        )
+        assert created.returncode == 0, created.stderr + created.stdout
+        config_path = target / "context" / "config.json"
+        config = json.loads(config_path.read_text())
+        assert "autoCommitContext" not in config
+
+        config["autoCommitContext"] = True
+        config_path.write_text(json.dumps(config))
+        refreshed = subprocess.run(
+            [sys.executable, str(bootstrap), "--target", str(target), "--refresh"],
+            capture_output=True,
+            text=True,
+        )
+        assert refreshed.returncode == 0, refreshed.stderr + refreshed.stdout
+        assert "autoCommitContext" not in json.loads(config_path.read_text())
+
+
 def test_bootstrap_preflights_dual_markers_before_creating_context():
     bootstrap = SCRIPTS / "bootstrap.py"
     with tempfile.TemporaryDirectory() as directory:
@@ -162,6 +187,60 @@ def test_bootstrap_preflights_dual_markers_before_creating_context():
         assert result.returncode != 0
         assert "managed markers" in result.stdout
         assert snapshot_tree(target) == before
+
+
+@pytest.mark.parametrize("extra", (("--generate",), ("--generate", "--init-git")))
+def test_ambiguous_global_platform_leaves_nonexistent_target_unchanged(tmp_path, extra):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir()
+    target = tmp_path / "firstmate"
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env.pop("CLAUDE_CODE", None)
+    env.pop("CODEX", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "bootstrap.py"),
+            "--target",
+            str(target),
+            "--scope",
+            "global",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "choose --platform" in result.stdout
+    assert not target.exists()
+
+
+def test_global_refresh_failure_leaves_nonexistent_target_unchanged(tmp_path):
+    target = tmp_path / "firstmate"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "bootstrap.py"),
+            "--target",
+            str(target),
+            "--scope",
+            "global",
+            "--platform",
+            "codex",
+            "--refresh",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert not target.exists()
 
 
 def test_refresh_preflights_dual_markers_before_updating_machinery():

@@ -65,8 +65,8 @@ def test_patch_rejects_unsafe_and_fake_markers():
         "tool_name": "apply_patch",
         "tool_input": {"command": "*** Begin Patch\n*** Add File: ../escape.py\n*** Add File: /tmp/no.py\n*** Add File: ok.py\n+*** Add File: fake.py\n*** End Patch\x00"},
     })
-    assert event.paths == (Path("ok.py"),)
-    assert event.unsafe_paths == ("../escape.py", "/tmp/no.py", "NUL payload")
+    assert event.paths == (Path("/tmp/no.py"), Path("ok.py"))
+    assert event.unsafe_paths == ("../escape.py", "NUL payload")
 
 
 def test_bash_and_collaboration_tools_do_not_invent_paths():
@@ -102,7 +102,7 @@ def test_dispatch_blocks_unsafe_edit_with_one_actionable_reason(tmp_path):
     event = normalize_event("PreToolUse", {"tool_name": "Write", "tool_input": {"file_path": "../escape.py"}})
     result = dispatch(event, tmp_path)
     assert not result.allow
-    assert result.reason == "edit paths must stay inside the project"
+    assert result.reason == "edit paths must stay inside the project or canonical context"
 
 
 def test_subagent_start_without_role_task_or_scope_injects_nothing(tmp_path):

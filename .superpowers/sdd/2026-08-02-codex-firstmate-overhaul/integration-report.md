@@ -46,3 +46,36 @@
 
 - Live installed Codex/Claude hook execution remains Task 11.
 - Release/changelog/package gates remain Task 10.
+
+## Fix round 1
+
+- Migration rejects source-root and nested symlinks before copy; source,
+  outside data, and target remain unchanged on failure.
+- Stop/SessionEnd appends one escaped 500-character candidate through the
+  shared inbox mutex for Claude and Codex, emits no model context, and restores
+  inbox mode to `0600` after atomic replacement.
+- Unsupported `autoCommitContext` is absent on bootstrap and removed on
+  refresh; no auto-commit behavior is claimed.
+- Linked-worktree edits accept absolute paths only inside the Git worktree or
+  verified canonical context. Absolute outside paths and source/context
+  symlink escapes fail before shared read/lock gates; canonical page edits keep
+  lock-owner enforcement.
+- Global bootstrap resolves and preflights platform adapters before mkdir or
+  Git initialization. Failed refresh and ambiguous generate/init leave a
+  nonexistent target absent.
+
+### Fix-round TDD evidence
+
+- Symlink migration RED `2/2`; Firstmate GREEN `15/15`.
+- Stop capture/config RED `3/3`; capture/config GREEN `9/9`.
+- Linked absolute-path RED `3/3`; hook integration GREEN `35/35`.
+- Global preflight RED `3/3`; platform GREEN `24/24`.
+
+### Fix-round verification
+
+- Focused findings: `94 passed`.
+- Full Python suite: `210 passed`.
+- Smoke: `101 passed, 0 failed`.
+- Python compile: `28` scripts, exit `0`.
+- Bash syntax: `6` files, `0` failures.
+- `git diff --check`: exit `0`.

@@ -15,7 +15,9 @@ from pathlib import Path
 
 from context_utils import (
     ContextRootError,
+    MutexTimeout,
     acquire_page_lock,
+    append_capture_candidate,
     canonical_context_root,
     read_config,
     read_ledger_events,
@@ -95,9 +97,67 @@ def _safe_path(raw: object) -> tuple[Path | None, str | None]:
     if "\0" in raw:
         return None, "NUL path"
     path = Path(raw)
-    if path.is_absolute() or ".." in path.parts:
+    if ".." in path.parts:
         return None, raw
     return path, None
+
+
+def _event_roots(event: Event, context_root: Path) -> tuple[Path, Path, bool]:
+    project = (event.cwd or context_root.parent).resolve()
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            project = Path(completed.stdout.strip()).resolve()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        canonical = canonical_context_root(project)
+    except ContextRootError:
+        return project, context_root.resolve(), False
+    return project, canonical.resolve(), True
+
+
+def _contained_path(path: Path, root: Path) -> Path | None:
+    absolute = path.absolute()
+    try:
+        relative = absolute.relative_to(root)
+    except ValueError:
+        return None
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            return None
+    try:
+        absolute.resolve().relative_to(root)
+    except ValueError:
+        return None
+    return relative
+
+
+def _validated_path(path: Path, event: Event, context_root: Path) -> tuple[Path | None, Path]:
+    project, canonical, canonical_valid = _event_roots(event, context_root)
+    gate_root = canonical if canonical_valid else context_root.resolve()
+    if path.is_absolute():
+        if canonical_valid and (relative := _contained_path(path, canonical)) is not None:
+            return Path("context", *relative.parts), gate_root
+        if (relative := _contained_path(path, project)) is not None:
+            return relative, gate_root
+        return None, gate_root
+    if path.parts and path.parts[0] == "context":
+        relative = Path(*path.parts[1:])
+        if _contained_path(canonical / relative, canonical) is None:
+            return None, gate_root
+        return path, gate_root
+    if _contained_path(project / path, project) is None:
+        return None, gate_root
+    return path, gate_root
 
 
 def _clean(value: object, limit: int = 240) -> str:
@@ -171,7 +231,7 @@ def normalize_event(event_name, payload) -> Event:
         permission_mode=str(data.get("permission_mode") or data.get("permissionMode") or ""),
         model=str(data.get("model") or ""),
         prompt=str(data.get("prompt") or data.get("user_prompt") or ""),
-        final_message=str(data.get("final_message") or ""),
+        final_message=_clean(data.get("final_message"), 4000),
         role=_clean(data.get("agent_type") or data.get("role") or tool_input.get("agent_type") or tool_input.get("role")),
         task=_clean(data.get("task") or data.get("task_name") or tool_input.get("task_name") or tool_input.get("message")),
         result=_clean(data.get("result") or data.get("expected_result") or tool_input.get("result")),
@@ -304,10 +364,11 @@ def _read_marker(context_root: Path, session_id: str, page: Path) -> Path:
 
 def _mark_context_reads(event: Event, context_root: Path) -> None:
     for path in event.paths:
-        if len(path.parts) < 2 or path.parts[0] != "context":
+        path, gate_root = _validated_path(path, event, context_root)
+        if path is None or len(path.parts) < 2 or path.parts[0] != "context":
             continue
         page = Path(*path.parts[1:])
-        marker = _read_marker(context_root, event.session_id, page)
+        marker = _read_marker(gate_root, event.session_id, page)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
 
@@ -354,26 +415,23 @@ def _lock_gate(path: Path, event: Event, context_root: Path) -> Result:
 
 def _edit_gate(event: Event, context_root: Path) -> Result:
     if event.unsafe_paths:
-        return block("edit paths must stay inside the project")
+        return block("edit paths must stay inside the project or canonical context")
     missing = []
     relevant = []
-    project_root = context_root.parent.resolve()
-    for path in event.paths:
-        target = (project_root / path).resolve()
-        try:
-            target.relative_to(project_root)
-        except ValueError:
-            return block("edit paths must stay inside the project")
+    for raw_path in event.paths:
+        path, gate_root = _validated_path(raw_path, event, context_root)
+        if path is None:
+            return block("edit paths must stay inside the project or canonical context")
         if READ_ONLY_PARTS.intersection(path.parts):
             return block(f"{path.as_posix()} is in a read-only source directory")
-        locked = _lock_gate(path, event, context_root)
+        locked = _lock_gate(path, event, gate_root)
         if not locked.allow:
             return locked
         if not path.parts or path.parts[0] in {"context", ".claude", ".codex"} or path.name in {"AGENTS.md", "CLAUDE.md", "MEMORY.md"}:
             continue
-        for page in _tracking_pages(path, context_root):
+        for page in _tracking_pages(path, gate_root):
             relevant.append(page)
-            if not _read_marker(context_root, event.session_id, page).exists():
+            if not _read_marker(gate_root, event.session_id, page).exists():
                 missing.append(page)
     if missing:
         pages = ", ".join(f"context/{page.as_posix()}" for page in dict.fromkeys(missing))
@@ -409,8 +467,10 @@ def dispatch(event: Event, context_root) -> Result:
         if event.tool == "Read":
             _mark_context_reads(event, root)
             return Result()
-        if event.paths and any(p.parts and p.parts[0] == "context" for p in event.paths):
-            return Result(context=_validation_failure(root))
+        validated = [_validated_path(path, event, root) for path in event.paths]
+        if any(path and path.parts and path.parts[0] == "context" for path, _gate_root in validated):
+            gate_root = next(gate_root for path, gate_root in validated if path and path.parts[0] == "context")
+            return Result(context=_validation_failure(gate_root))
         return Result(context=_freshness_update(root) if event.paths else "")
     if event.name == "SubagentStart":
         if not event.task:
@@ -424,6 +484,23 @@ def dispatch(event: Event, context_root) -> Result:
         failure = _validation_failure(root)
         return Result(context=failure, continue_=bool(failure))
     if event.name in {"Stop", "SessionEnd"}:
+        if event.final_message:
+            try:
+                target = canonical_context_root(event.cwd or root.parent)
+                if re.search(r"\b(fail(?:ure|ed)?|error|blocked)\b", event.final_message, re.I):
+                    kind = "failure"
+                elif re.search(r"\b(question|unknown|unclear)\b", event.final_message, re.I):
+                    kind = "open-question"
+                else:
+                    kind = "decision"
+                append_capture_candidate(
+                    target,
+                    _clean(event.final_message, 500),
+                    kind,
+                    _clean(event.session_id, 120),
+                )
+            except (ContextRootError, MutexTimeout, OSError, ValueError):
+                pass
         return Result()
     return Result()
 

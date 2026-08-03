@@ -22,6 +22,7 @@ CONTEXT_ONLY = "context-only"
 _HYGIENE_RUNNING = False
 CONTEXT_LOCATOR = "context-architecture.json"
 CONTEXT_LOCATOR_VERSION = 1
+CAPTURE_KINDS = {"decision", "failure", "open-question"}
 
 
 def firstmate_root(env: dict | None = None) -> Path:
@@ -38,14 +39,22 @@ def firstmate_root(env: dict | None = None) -> Path:
 
 def migrate_firstmate(source: Path, target: Path) -> Path:
     """Copy legacy Firstmate state; never delete or mutate the source."""
-    source, target = Path(source).resolve(), Path(target).resolve()
+    source_path = Path(source).expanduser().absolute()
+    if source_path.is_symlink():
+        raise ValueError(f"Firstmate migration source contains symlink: {source_path}")
+    source, target = source_path.resolve(), Path(target).resolve()
     if source == target or target.is_relative_to(source) or source.is_relative_to(target):
         raise ValueError(f"Firstmate migration roots overlap: {source} and {target}")
     if not source.is_dir():
         raise FileNotFoundError(source)
     if target.exists() and any(target.iterdir()):
         raise FileExistsError(f"migration target is not empty: {target}")
-    shutil.copytree(source, target, dirs_exist_ok=True)
+    for directory, directories, files in os.walk(source, followlinks=False):
+        for name in (*directories, *files):
+            path = Path(directory) / name
+            if path.is_symlink():
+                raise ValueError(f"Firstmate migration source contains symlink: {path}")
+    shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
     return target
 
 
@@ -65,6 +74,48 @@ def registered_projects(context_root: Path, registry: Path | None = None) -> tup
         if len(parts) == 4 and parts[0] and parts[1]:
             projects.append((parts[0][:80], parts[1][:500], parts[2][:240], parts[3][:40]))
     return tuple(projects)
+
+
+def append_capture_candidate(
+    context_root: Path,
+    summary: object,
+    kind: str,
+    source: object = "",
+) -> bool:
+    """Append one bounded, escaped candidate to the canonical private inbox."""
+    if kind not in CAPTURE_KINDS:
+        raise ValueError(f"unsupported candidate kind: {kind}")
+    summary = re.sub(r"\s+", " ", str(summary or "")).strip()[:500]
+    source = re.sub(r"\s+", " ", str(source or "")).strip()[:120]
+    if not summary:
+        return False
+    context_root = Path(context_root).resolve()
+    inbox = context_root / "capture-inbox.html"
+    if not inbox.is_file():
+        return False
+    with context_mutex(context_root, "capture-inbox"):
+        if inbox.stat().st_size > 1_048_576:
+            raise ValueError("capture inbox exceeds 1 MiB")
+        content = inbox.read_text(errors="replace")
+        normalized = summary.casefold()
+        for match in re.finditer(r'<article class="candidate"[^>]*data-status="pending"[^>]*>', content):
+            stored = re.search(r'data-summary="([^"]*)"', match.group())
+            if stored and re.sub(r"\s+", " ", html.unescape(stored.group(1))).strip().casefold() == normalized:
+                return False
+        article = (
+            f'<article class="candidate" data-kind="{kind}" data-status="pending" '
+            f'data-summary="{html.escape(summary, quote=True)}" '
+            f'data-source="{html.escape(source, quote=True)}">'
+            f'{kind}: {html.escape(summary)} (source: {html.escape(source)}, status=pending)'
+            f'</article>\n'
+        )
+        section = re.search(r'(<section\b[^>]*\bid=["\']candidates["\'][^>]*>)(.*?)(</section>)', content, re.S)
+        if not section:
+            raise ValueError("capture inbox is missing candidates section")
+        updated = content[:section.start()] + section.group(1) + section.group(2) + article + section.group(3) + content[section.end():]
+        write_atomic(inbox, updated, context_root=context_root)
+        inbox.chmod(0o600)
+    return True
 
 
 class MutexTimeout(Exception):

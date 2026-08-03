@@ -1,7 +1,11 @@
+import html
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -83,6 +87,73 @@ def test_linked_worktree_installs_both_harnesses_against_canonical_context(tmp_p
         assert str(root / "scripts" / "hook_dispatch.py") in text
         assert f"--context-root {root}" in text
         assert str(linked / "context") not in text
+
+
+def test_linked_worktree_accepts_absolute_project_and_canonical_context_edits(tmp_path):
+    _, linked, root = linked_project(tmp_path)
+    page = root / "decisions.html"
+    page.write_text(
+        page.read_text()
+        .replace('content="false"', 'content="true"', 1)
+        .replace('name="locked-by" content=""', 'name="locked-by" content="agent-linked"', 1)
+    )
+    source = linked / "src" / "cache.py"
+    source.parent.mkdir()
+    source.write_text("cache")
+
+    for path in (source, page):
+        event = normalize_event("PreToolUse", {
+            "cwd": str(linked),
+            "agent_id": "agent-linked",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(path)},
+        })
+        assert dispatch(event, root).allow
+
+
+def test_linked_worktree_rejects_absolute_outside_and_symlink_escape_edits(tmp_path):
+    _, linked, root = linked_project(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("private")
+    source_link = linked / "escape.py"
+    source_link.symlink_to(outside)
+    context_link = root / "decisions" / "escape.html"
+    context_link.symlink_to(outside)
+
+    for path in (outside, source_link, context_link):
+        event = normalize_event("PreToolUse", {
+            "cwd": str(linked),
+            "agent_id": "agent-linked",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(path)},
+        })
+        result = dispatch(event, root)
+        assert not result.allow
+        assert result.reason == "edit paths must stay inside the project or canonical context"
+
+
+def test_linked_absolute_canonical_edit_still_enforces_shared_lock_owner(tmp_path):
+    _, linked, root = linked_project(tmp_path)
+    config = json.loads((root / "config.json").read_text())
+    config["autoAcquireOnEdit"] = False
+    (root / "config.json").write_text(json.dumps(config))
+    page = root / "decisions.html"
+    page.write_text(
+        page.read_text()
+        .replace('content="false"', 'content="true"', 1)
+        .replace('name="locked-by" content=""', 'name="locked-by" content="other-agent"', 1)
+    )
+    event = normalize_event("PreToolUse", {
+        "cwd": str(linked),
+        "agent_id": "agent-linked",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(page)},
+    })
+
+    result = dispatch(event, root)
+
+    assert not result.allow
+    assert "locked by other-agent" in result.reason
 
 
 def test_subagent_protocol_additional_context_is_exact_canonical_capsule(tmp_path):
@@ -212,3 +283,43 @@ def test_firstmate_route_is_expressed_inside_capsule_only(tmp_path):
     assert all(term not in text for term in FORBIDDEN)
     assert "Firstmate route:" not in text
     assert any(event.get("session") == "fm-s1" for event in read_ledger_events(root))
+
+
+@pytest.mark.parametrize(("platform", "event_name"), (("claude", "Stop"), ("codex", "SessionEnd")))
+def test_stop_protocol_privately_captures_one_bounded_candidate(tmp_path, platform, event_name):
+    root = tmp_path / "firstmate" / "context"
+    root.mkdir(parents=True)
+    (root / "index.html").write_text("<html></html>")
+    (root / "config.json").write_text(json.dumps({"scope": "global", "repoRoots": [{"path": "."}]}))
+    (root / "capture-inbox.html").write_text('<html><body><section id="candidates"></section></body></html>')
+    private = "TOKEN=supersecret " + "x" * 1000
+    payload = {"session_id": "session-private", "final_message": f"Failure found: {private}"}
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "hook_dispatch.py"),
+            "--platform",
+            platform,
+            "--event",
+            event_name,
+            "--context-root",
+            str(root),
+        ],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert json.loads(completed.stdout) == {"hookSpecificOutput": {"hookEventName": event_name}}
+    assert "supersecret" not in completed.stdout
+    article = re.search(r'<article class="candidate"[^>]*>', (root / "capture-inbox.html").read_text())
+    assert article
+    summary = html.unescape(re.search(r'data-summary="([^"]*)"', article.group()).group(1))
+    assert len(summary) <= 500
+    assert "supersecret" not in summary
+    assert "[redacted]" in summary
+    assert 'data-kind="failure"' in article.group()
+    assert 'data-source="session-private"' in article.group()
+    assert (root / "capture-inbox.html").stat().st_mode & 0o777 == 0o600

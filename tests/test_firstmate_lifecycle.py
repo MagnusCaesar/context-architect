@@ -40,6 +40,36 @@ def test_explicit_migration_copies_without_deleting_source(tmp_path):
     assert (target / "context" / "project-registry.html").read_text() == "registry"
 
 
+def test_migration_rejects_nested_symlink_without_reading_or_writing(tmp_path):
+    source, target, outside = tmp_path / "old", tmp_path / "new", tmp_path / "private"
+    (source / "context" / "nested").mkdir(parents=True)
+    (source / "context" / "keep").write_text("source")
+    outside.write_text("PRIVATE-DATA")
+    (source / "context" / "nested" / "escape").symlink_to(outside)
+    before = sorted((path.relative_to(source).as_posix(), path.is_symlink()) for path in source.rglob("*"))
+
+    with pytest.raises(ValueError, match="symlink"):
+        migrate_firstmate(source, target)
+
+    assert sorted((path.relative_to(source).as_posix(), path.is_symlink()) for path in source.rglob("*")) == before
+    assert outside.read_text() == "PRIVATE-DATA"
+    assert not target.exists()
+
+
+def test_migration_rejects_symlink_source_root(tmp_path):
+    real, source, target = tmp_path / "real", tmp_path / "old", tmp_path / "new"
+    real.mkdir()
+    (real / "keep").write_text("source")
+    source.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        migrate_firstmate(source, target)
+
+    assert source.is_symlink()
+    assert (real / "keep").read_text() == "source"
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("layout", ["same", "target-inside-source", "source-inside-target"])
 def test_migration_rejects_overlapping_roots_without_mutating_source(tmp_path, layout):
     source = tmp_path / "source"; source.mkdir(); marker = source / "keep"; marker.write_text("source")
