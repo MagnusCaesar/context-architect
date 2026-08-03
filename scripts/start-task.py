@@ -4,6 +4,7 @@ Start a context task: classify, check staleness, acquire lock if needed.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -33,6 +34,7 @@ from context_utils import (
     write_pid_sentinel,
     contention_break_allowed,
 )
+from task_capsule import CapsuleError, build_capsule, record_receipt
 
 
 def classify_task(lines_changed: int, files_changed: int) -> str:
@@ -41,6 +43,15 @@ def classify_task(lines_changed: int, files_changed: int) -> str:
     if lines_changed <= 5 and files_changed <= 2:
         return "tiny-write"
     return "standard-write"
+
+
+def write_task_diagnostics(context_root: Path, payload: dict) -> str:
+    directory = context_root / ".diagnostics"
+    directory.mkdir(exist_ok=True)
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    path = directory / f"task-start-{digest}.json"
+    write_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", context_root=context_root)
+    return path.relative_to(context_root).as_posix()
 
 
 def page_review_time(page_path: Path) -> str:
@@ -240,6 +251,10 @@ def main():
     parser = argparse.ArgumentParser(description="Start a context task")
     parser.add_argument("--page", help="Target page (e.g., parser.html)")
     parser.add_argument("--intent", default="", help="What you're doing")
+    parser.add_argument("--result", default="", help="Expected task result")
+    parser.add_argument("--path", action="append", default=[], help="Allowed or affected repository path")
+    parser.add_argument("--session", default=os.environ.get("CODEX_SESSION_ID", ""))
+    parser.add_argument("--turn", default=os.environ.get("CODEX_TURN_ID", ""))
     parser.add_argument("--lines", type=int, default=10, help="Estimated lines changed")
     parser.add_argument("--files", type=int, default=1, help="Estimated files changed")
     parser.add_argument("--agent-id", default=os.environ.get("AGENT_ID", "orchestrator"))
@@ -251,12 +266,34 @@ def main():
         print(json.dumps({"status": "error", "error": "No context/ directory found"}))
         sys.exit(1)
 
+    config = read_config(context_root)
+    role = agent_role(context_root, args.agent_id)
+    task = {
+        "task": args.intent or (f"Read {args.page}" if args.read_only and args.page else "Read project context"),
+        "result": args.result or ("Complete the scoped read." if args.read_only else "Complete the scoped update."),
+    }
+    try:
+        capsule = build_capsule(
+            context_root,
+            task,
+            args.path,
+            role,
+            config.get("taskCapsuleMaxChars", 4000),
+        )
+    except CapsuleError as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}))
+        sys.exit(1)
+
     if args.read_only:
+        receipt = record_receipt(context_root, capsule, session=args.session, turn=args.turn)
+        diagnostics_file = write_task_diagnostics(context_root, {"mode": "read_only", "receipt": receipt})
         print(json.dumps({
             "status": "read_only",
             "task_class": "read-only",
             "lock_status": "not needed",
             "instruction": "Proceed. No locks required for reads.",
+            "capsule": capsule.text,
+            "diagnostics_file": diagnostics_file,
         }, indent=2))
         return
 
@@ -279,6 +316,12 @@ def main():
     task_class = classify_task(args.lines, args.files)
     staleness = check_staleness(context_root, page)
     lock_status = acquire_lock(context_root, page, args.agent_id, args.intent)
+    receipt = record_receipt(context_root, capsule, session=args.session, turn=args.turn)
+    diagnostics_file = write_task_diagnostics(context_root, {
+        "lock_status": lock_status,
+        "receipt": receipt,
+        "staleness": staleness,
+    })
 
     result = {
         "status": lock_status.get("status"),
@@ -286,7 +329,8 @@ def main():
         "page": page,
         "intent": args.intent,
         "lock_status": lock_status,
-        "staleness": staleness,
+        "capsule": capsule.text,
+        "diagnostics_file": diagnostics_file,
         "instruction": "",
     }
 

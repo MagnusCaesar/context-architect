@@ -513,6 +513,13 @@ def append_ledger_event_record(context_root: Path, record: dict) -> None:
         os.fsync(f.fileno())
 
 
+def append_ledger_record(context_root: Path, record: dict) -> None:
+    """Append one complete ledger record under the shared ledger mutex."""
+    with context_mutex(context_root, "ledger"):
+        append_ledger_event_record(context_root, record)
+    render_ledger_events(context_root)
+
+
 def ledger_event_row(record: dict) -> str:
     base = {
         "time": str(record.get("time", "")),
@@ -576,8 +583,7 @@ def append_ledger_event(
     }
     if extra_attrs:
         record["extra_attrs"] = {str(k): str(v) for k, v in extra_attrs.items()}
-    append_ledger_event_record(context_root, record)
-    render_ledger_events(context_root)
+    append_ledger_record(context_root, record)
 
 
 def latest_ledger_event(context_root: Path, page: str = "") -> str:
