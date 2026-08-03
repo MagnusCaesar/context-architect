@@ -5,6 +5,7 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import math
 import re
 import shlex
 import subprocess
@@ -92,6 +93,8 @@ def _safe_path(raw: object) -> tuple[Path | None, str | None]:
 
 
 def _clean(value: object, limit: int = 240) -> str:
+    if not isinstance(value, (str, int, float, bool)) or isinstance(value, float) and not math.isfinite(value):
+        return ""
     text = " ".join(str(value or "").split())
     text = SECRET.sub(lambda match: f"{match.group(1)}=[redacted]", text)
     return text[:limit]
@@ -247,7 +250,8 @@ def _restore_receipt(event: Event, context_root: Path) -> str:
         created = float(data.get("created_at", 0))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return ""
-    if data.get("session") != event.session_id or time.time() - created > RECEIPT_MAX_AGE:
+    age = time.time() - created
+    if data.get("session") != event.session_id or not math.isfinite(created) or not 0 <= age <= RECEIPT_MAX_AGE:
         return ""
     capsule = _clean(data.get("capsule"), CAPSULE_LIMIT)
     return capsule if capsule else ""
@@ -273,13 +277,14 @@ def _tracking_pages(path: Path, context_root: Path) -> tuple[Path, ...]:
     rel = path.as_posix()
     pages = []
     for page in sorted(context_root.rglob("*.html")):
-        if "docs" in page.parts:
+        relative = page.relative_to(context_root)
+        if "docs" in relative.parts:
             continue
         tracking = tracks_status(page)
         if tracking["status"] != "tracked":
             continue
         if any(rel == pattern or fnmatch.fnmatch(rel, pattern) for pattern in tracking["tracks"]):
-            pages.append(page.relative_to(context_root))
+            pages.append(relative)
     return tuple(pages)
 
 

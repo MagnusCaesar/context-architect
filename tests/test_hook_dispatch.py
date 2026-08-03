@@ -1,8 +1,11 @@
 import json
+import math
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -16,6 +19,7 @@ from hook_dispatch import (  # noqa: E402
     render_codex_result,
 )
 from platforms import managed_hook_config  # noqa: E402
+import hook_dispatch  # noqa: E402
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
@@ -121,6 +125,19 @@ def test_subagent_start_without_role_task_or_scope_injects_nothing(tmp_path):
     assert dispatch(event, tmp_path).context == ""
 
 
+def test_subagent_payload_does_not_stringify_sensitive_nested_containers(tmp_path):
+    event = normalize_event("SubagentStart", {
+        "agent_type": {"password": "role-secret"},
+        "task": {"token": "task-secret"},
+        "scope": [{"api_key": "scope-secret"}, "scripts/hook_dispatch.py"],
+    })
+    context = dispatch(event, tmp_path).context
+    assert event.role == ""
+    assert event.task == ""
+    assert event.scope == ("scripts/hook_dispatch.py",)
+    assert all(secret not in context for secret in ("role-secret", "task-secret", "scope-secret"))
+
+
 def test_subagent_stop_continues_only_when_validation_concretely_fails(tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -160,6 +177,19 @@ def test_pretool_source_edit_requires_its_tracking_page_read(tmp_path):
     })
     assert dispatch(read, context).allow
     assert dispatch(edit, context).allow
+
+
+def test_tracking_page_under_repo_with_docs_ancestor_is_not_skipped(tmp_path):
+    project = tmp_path / "docs" / "project"
+    context = project / "context"
+    context.mkdir(parents=True)
+    (context / "module.html").write_text('<meta name="tracks" content="src/a.py">')
+    event = normalize_event("PreToolUse", {
+        "session_id": "session-1", "tool_name": "Edit", "tool_input": {"file_path": "src/a.py"},
+    })
+    result = dispatch(event, context)
+    assert not result.allow
+    assert result.reason == "read context/module.html before editing src/a.py"
 
 
 def test_pretool_context_edit_enforces_existing_lock_owner(tmp_path):
@@ -222,6 +252,41 @@ def test_postcompact_rejects_oversized_receipt_with_bounded_diagnostic(tmp_path)
     context = dispatch(normalize_event("PostCompact", {"session_id": "session-1"}), tmp_path).context
     assert "oversized" in context.lower()
     assert len(context) <= 800
+
+
+@pytest.mark.parametrize("created_at", [math.nan, math.inf, -math.inf])
+def test_postcompact_rejects_nonfinite_receipt_timestamps(tmp_path, created_at):
+    pre = normalize_event("PreCompact", {"session_id": "session-1", "task": "unsafe time"})
+    dispatch(pre, tmp_path)
+    receipt = next((tmp_path / ".hook-receipts").glob("*.json"))
+    data = json.loads(receipt.read_text())
+    data["created_at"] = created_at
+    receipt.write_text(json.dumps(data))
+    assert dispatch(normalize_event("PostCompact", {"session_id": "session-1"}), tmp_path).context == ""
+
+
+def test_postcompact_rejects_future_receipt_timestamp(tmp_path, monkeypatch):
+    monkeypatch.setattr(hook_dispatch.time, "time", lambda: 1000.0)
+    pre = normalize_event("PreCompact", {"session_id": "session-1", "task": "future task"})
+    dispatch(pre, tmp_path)
+    receipt = next((tmp_path / ".hook-receipts").glob("*.json"))
+    data = json.loads(receipt.read_text())
+    data["created_at"] = 1000.001
+    receipt.write_text(json.dumps(data))
+    assert dispatch(normalize_event("PostCompact", {"session_id": "session-1"}), tmp_path).context == ""
+
+
+@pytest.mark.parametrize("age", [0.0, 3600.0])
+def test_postcompact_accepts_inclusive_receipt_age_boundaries(tmp_path, monkeypatch, age):
+    monkeypatch.setattr(hook_dispatch.time, "time", lambda: 5000.0)
+    pre = normalize_event("PreCompact", {"session_id": "session-1", "task": "boundary task"})
+    dispatch(pre, tmp_path)
+    receipt = next((tmp_path / ".hook-receipts").glob("*.json"))
+    data = json.loads(receipt.read_text())
+    data["created_at"] = 5000.0 - age
+    receipt.write_text(json.dumps(data))
+    restored = dispatch(normalize_event("PostCompact", {"session_id": "session-1"}), tmp_path).context
+    assert "boundary task" in restored
 
 
 def test_merge_replaces_only_managed_entries_without_hook_order_assumption():
