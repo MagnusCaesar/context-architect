@@ -129,41 +129,46 @@ def load_nodes(context_root: Path) -> list[Node]:
         meta = _meta(content)
         path_kind = _path_kind(path.relative_to(context_root))
         is_v2 = meta.get("contract-version") == "2"
-        article = re.search(r"<article\b([^>]*)>(.*?)</article>", content, flags=re.I | re.S)
-        attrs = _attrs(article.group(1)) if article else {}
-        body = article.group(2) if article else content
         relative = path.relative_to(context_root)
         root_wiki = len(relative.parts) == 1 and path.name not in ROOT_NON_NODE_PAGES
-        legacy_kind = "decision" if "decision" in attrs.get("class", "").split() else "wiki" if root_wiki else ""
-        if not path_kind and not is_v2 and not legacy_kind:
-            continue
-        node_id = _field(attrs, meta, body, "node-id") or _field(attrs, meta, body, "id")
-        if not node_id and (path_kind or legacy_kind):
-            node_id = path.stem
-        if not node_id:
-            continue
-        kind = _field(attrs, meta, body, "kind") or path_kind or legacy_kind or ("wiki" if is_v2 else "")
-        if not kind:
-            continue
-        status = _field(attrs, meta, body, "status").lower() or _default_status(kind)
-        parent = _field(attrs, meta, body, "parent") or None
-        statement = _field(attrs, meta, body, "statement")
-        if not statement:
-            match = re.search(r'<(?:section|p)\b[^>]*(?:id|class)=["\'][^"\']*statement[^"\']*["\'][^>]*>(.*?)</(?:section|p)>', body, flags=re.I | re.S)
-            statement = _strip(match.group(1)) if match else ""
-        nodes.append(Node(
-            node_id=node_id,
-            kind=kind,
-            status=status,
-            path=path,
-            archived="archive" in path.parts or "archived" in path.parts,
-            parent=parent,
-            children=_values(_field(attrs, meta, body, "children")),
-            related=_values(_field(attrs, meta, body, "related")),
-            tracks=_values(_field(attrs, meta, body, "tracks")),
-            affects=_values(_field(attrs, meta, body, "affects")),
-            statement=statement,
-        ))
+        articles = list(re.finditer(r"<article\b([^>]*)>(.*?)</article>", content, flags=re.I | re.S))
+        decision_cards = [article for article in articles if "decision" in _attrs(article.group(1)).get("class", "").split()]
+        candidates = articles[:1] if is_v2 else decision_cards or articles[:1]
+        if not candidates:
+            candidates = [None]
+        for article in candidates:
+            attrs = _attrs(article.group(1)) if article else {}
+            body = article.group(2) if article else content
+            legacy_kind = "decision" if "decision" in attrs.get("class", "").split() else "wiki" if root_wiki else ""
+            if not path_kind and not is_v2 and not legacy_kind:
+                continue
+            node_id = _field(attrs, meta, body, "node-id") or _field(attrs, meta, body, "id")
+            if not node_id and (path_kind or legacy_kind):
+                node_id = path.stem
+            if not node_id:
+                continue
+            kind = _field(attrs, meta, body, "kind") or path_kind or legacy_kind or ("wiki" if is_v2 else "")
+            if not kind:
+                continue
+            status = _field(attrs, meta, body, "status").lower() or _default_status(kind)
+            parent = _field(attrs, meta, body, "parent") or None
+            statement = _field(attrs, meta, body, "statement")
+            if not statement:
+                match = re.search(r'<(?:section|p)\b[^>]*(?:id|class)=["\'][^"\']*statement[^"\']*["\'][^>]*>(.*?)</(?:section|p)>', body, flags=re.I | re.S)
+                statement = _strip(match.group(1)) if match else ""
+            nodes.append(Node(
+                node_id=node_id,
+                kind=kind,
+                status=status,
+                path=path,
+                archived="archive" in path.parts or "archived" in path.parts,
+                parent=parent,
+                children=_values(_field(attrs, meta, body, "children")),
+                related=_values(_field(attrs, meta, body, "related")),
+                tracks=_values(_field(attrs, meta, body, "tracks")),
+                affects=_values(_field(attrs, meta, body, "affects")),
+                statement=statement,
+            ))
     return nodes
 
 
@@ -194,16 +199,21 @@ def _router_nodes(context_root: Path, kind: str, nodes: list[Node]) -> list[Node
     graph = re.search(r'<section\b[^>]*(?:id|class)=["\'][^"\']*\bgraph\b[^"\']*["\'][^>]*>(.*?)</section>', router.read_text(errors="replace"), flags=re.I | re.S)
     if not graph:
         return []
-    by_path = {node.path.resolve(): node for node in nodes}
-    paths = []
+    by_path: dict[Path, list[Node]] = {}
+    for node in nodes:
+        by_path.setdefault(node.path.resolve(), []).append(node)
+    listed = []
     for href in re.findall(r'href\s*=\s*(["\'])(.*?)\1', graph.group(1), flags=re.I | re.S):
-        raw = html.unescape(href[1]).split("#", 1)[0].split("?", 1)[0].strip()
+        raw, _, fragment = html.unescape(href[1]).partition("#")
+        raw = raw.split("?", 1)[0].strip()
         if not raw:
             continue
         path = (router.parent / raw).resolve()
-        if path in by_path and path not in paths:
-            paths.append(path)
-    return [by_path[path] for path in paths]
+        candidates = by_path.get(path, [])
+        node = next((candidate for candidate in candidates if candidate.node_id == fragment), None) if fragment else candidates[0] if len(candidates) == 1 else None
+        if node and node not in listed:
+            listed.append(node)
+    return listed
 
 
 def router_heads(context_root: Path, kind: str) -> list[Node]:

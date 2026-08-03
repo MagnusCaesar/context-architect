@@ -128,6 +128,42 @@ def test_unreachable_legacy_root_page_is_hard_failure(tmp_path):
     assert "orphan page: context/orphan.html" in check_reachability_critical(root)
 
 
+def test_legacy_router_parses_and_requires_every_decision_card(tmp_path):
+    root = tmp_path / "context"
+    root.mkdir()
+    (root / "index.html").write_text('<html><body><a href="decisions.html">decisions</a></body></html>')
+    decisions = """<html><body>
+<section id="graph">
+  <a href="decisions.html#dec-001-first">first</a>
+  <a href="decisions.html#dec-002-second">second</a>
+</section>
+<article class="decision" id="dec-001-first" data-status="accepted"><p>First.</p></article>
+<article class="decision" id="dec-002-second" data-status="accepted"><p>Second.</p></article>
+</body></html>"""
+    (root / "decisions.html").write_text(decisions)
+
+    nodes = load_nodes(root)
+    assert [node.node_id for node in nodes] == ["dec-001-first", "dec-002-second"]
+    assert [node.node_id for node in router_heads(root, "decision")] == ["dec-001-first", "dec-002-second"]
+    assert validate_graphs(root, nodes) == []
+
+    (root / "decisions.html").write_text(decisions.replace(
+        '  <a href="decisions.html#dec-002-second">second</a>\n', ""
+    ))
+    assert "router omits live head dec-002-second" in validate_graphs(root, load_nodes(root))
+
+
+def test_hard_reachability_starts_at_index_not_bootloader(tmp_path):
+    root = tmp_path / "context"
+    root.mkdir()
+    (tmp_path / "AGENTS.md").write_text("Read context/index.html and context/bootloader-only.html")
+    (root / "index.html").write_text('<html><body><a href="wiki.html">wiki</a></body></html>')
+    (root / "wiki.html").write_text(router("wiki"))
+    (root / "bootloader-only.html").write_text('<html><body><h1>Hidden</h1></body></html>')
+
+    assert "orphan page: context/bootloader-only.html" in check_reachability_critical(root)
+
+
 @pytest.mark.parametrize("mutation, expected", [
     ("list_child_on_router", "router contains non-head dec-002-child"),
     ("omit_live_head", "router omits live head dec-003-other"),

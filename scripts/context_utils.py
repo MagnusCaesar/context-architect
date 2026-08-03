@@ -578,14 +578,22 @@ def _html_edges(context_root: Path, page: Path) -> tuple[set[str], list[dict]]:
     return edges, broken
 
 
-def check_reachability(context_root: Path) -> dict:
+def check_reachability(context_root: Path, *, index_root: bool = False) -> dict:
     live_pages = live_context_pages(context_root)
-    root_file, root_name, fallback_root, root_warning = select_reachability_root(context_root)
+    if index_root:
+        root_file = context_root / "index.html"
+        root_name = rel_to_project(context_root, root_file)
+        fallback_root = False
+        root_warning = "" if root_file.exists() else "context/index.html not found"
+    else:
+        root_file, root_name, fallback_root, root_warning = select_reachability_root(context_root)
     edges: dict[str, set[str]] = {}
     broken_links: list[dict] = []
 
-    if root_name.startswith("context/") and root_file.suffix == ".html":
+    if root_file.exists() and root_name.startswith("context/") and root_file.suffix == ".html":
         root_edges, root_broken = _html_edges(context_root, root_file)
+    elif not root_file.exists():
+        root_edges, root_broken = set(), []
     else:
         root_edges, root_broken = _bootloader_edges(context_root, root_file)
     edges[root_name] = root_edges

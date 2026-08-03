@@ -49,6 +49,15 @@ def test_v2_work_node_parses_minimal_contract(tmp_path):
     assert node.statement == "Ship a reproducible tagged package."
 
 
+def test_v2_document_with_multiple_articles_emits_one_node(tmp_path):
+    root = write_context(tmp_path, {
+        "workstreams/work-001-release.html": WORK_NODE_HTML.replace(
+            "</body>", '<article id="unrelated">Not another graph node.</article></body>'
+        ),
+    })
+    assert [node.node_id for node in load_nodes(root)] == ["work-001-release"]
+
+
 def test_legacy_open_question_normalizes_as_work_question(tmp_path):
     root = write_context(tmp_path, {
         "open-questions/question-001-api.html": LEGACY_QUESTION_HTML,

@@ -85,8 +85,10 @@ def check_legacy_decision_fields(context_root: Path):
 
 
 def check_reachability_critical(context_root: Path):
-    result = check_reachability(context_root)
+    result = check_reachability(context_root, index_root=True)
     failures = [f"{item['from']} -> {item['to']}" for item in result.get("broken_links", [])]
+    if result.get("root_warning"):
+        failures.append(result["root_warning"])
     failures.extend(f"orphan page: {orphan}" for orphan in result.get("orphans", []))
     return failures
 
