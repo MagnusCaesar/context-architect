@@ -2,6 +2,7 @@
   "projectName": "{{PROJECT_NAME}}",
   "maxLinesPerPage": 200,
   "testCmd": "",
+  "questionOwners": ["captain", "external"],
   "repoRoots": [
     {"path": ".", "label": "main"}
   ],

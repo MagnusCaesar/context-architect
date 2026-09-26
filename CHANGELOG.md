@@ -6,6 +6,7 @@ All notable changes are recorded here. Release headings use exact Git tags so `p
 
 ### Added
 
+- Dependency-aware Active Work tasks, human question answer/deferral, retained captain dispositions, and bounded lifecycle task capsules from `firstmate-context-architecture-skill.zip`.
 - Shared Claude Code/Codex bootstrap core with explicit platform adapters and one canonical hook dispatcher.
 - Typed Wiki, Decision, Failure, and Workstream graphs with HEAD-only routers, strict link resolution, BFS discoverability from `context/index.html`, deterministic history, and non-mutating consolidation proposals.
 - Canonical context-root identity shared across linked Git worktrees.

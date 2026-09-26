@@ -96,6 +96,36 @@ def test_legacy_alias_warning_is_visible_from_cli(tmp_path):
     assert "FIRSTMATE_HOME is deprecated" in result.stderr
 
 
+def test_refresh_adds_lifecycle_routes_and_preserves_authored_owners(tmp_path):
+    target = tmp_path / "project"
+    target.mkdir()
+    command = [sys.executable, str(SCRIPTS / "bootstrap.py"), "--target", str(target), "--platform", "claude"]
+    created = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert created.returncode == 0, created.stderr
+    root = target / "context"
+    config = json.loads((root / "config.json").read_text())
+    config["questionOwners"] = ["captain", "team-lead"]
+    (root / "config.json").write_text(json.dumps(config))
+    question_router = root / "open-questions.html"
+    authored = '<p id="authored">Authored question guidance.</p>'
+    question_router.write_text(question_router.read_text().replace("</main>", authored + "</main>"))
+    (root / "active-work" / "archive.html").unlink()
+    (root / "active-work").rmdir()
+    (root / "active-work.html").unlink()
+    (root / "future-workstreams.html").unlink()
+    for _ in range(2):
+        refreshed = subprocess.run([*command, "--refresh"], capture_output=True, text=True, timeout=30)
+        assert refreshed.returncode == 0, refreshed.stderr
+        validated = subprocess.run([sys.executable, str(root / "scripts" / "validate.py")], cwd=target, capture_output=True, text=True, timeout=30)
+        assert validated.returncode == 0, validated.stdout + validated.stderr
+    assert authored in question_router.read_text()
+    assert json.loads((root / "config.json").read_text())["questionOwners"] == ["captain", "team-lead"]
+    assert question_router.read_text().count("<!-- CAPTAIN-QUESTION-ROWS -->") == 1
+    assert (root / "active-work" / "archive.html").is_file()
+    assert (root / "future-workstreams.html").is_file()
+    assert (root / "index.html").read_text().count('href="./active-work.html"') == 1
+
+
 @pytest.mark.parametrize("init_git", [False, True])
 def test_global_bootstrap_creates_private_state_and_git_is_opt_in(tmp_path, init_git):
     target = tmp_path / ("with-git" if init_git else "without-git"); target.mkdir()

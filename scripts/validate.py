@@ -6,6 +6,7 @@ import html
 import json
 import re
 import sys
+from importlib import import_module
 from datetime import datetime
 from pathlib import Path
 
@@ -403,6 +404,7 @@ def main():
         "links": check_links(context_root),
         "lock_meta": check_lock_meta(context_root),
         "knowledge_graph": validate_graphs(context_root, load_nodes(context_root)),
+        "task_lifecycle": import_module("task-lifecycle").validate_lifecycle(context_root),
         "legacy_decision_fields": check_legacy_decision_fields(context_root),
         "router_structure": check_router_structure(context_root),
         "required_meta": check_required_meta(context_root),

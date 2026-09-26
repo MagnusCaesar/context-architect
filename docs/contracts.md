@@ -358,6 +358,51 @@ Open questions block only when `blocking=true` and current task scope intersects
 `affects`, or when current task is listed in `blocked-work`. Durable answers
 should become decision nodes; answered question nodes point to `answered-by`.
 
+## Task And Human Question Lifecycle
+
+`context/scripts/task-lifecycle.py` maintains the active-task graph separately
+from typed durable workstream nodes. Task nodes use stable `AW-*` IDs beneath
+`active-work/`; the `active-work.html` router groups children under `AW-H1` through
+`AW-H4`. Dispositioned nodes retain their source paths and are linked from
+`active-work/archive.html`. Deferred tasks are removed from the active router;
+their questions, contingencies, and activation triggers remain discoverable
+through `future-workstreams.html`.
+
+Task states are `untriaged`, `ready`, `in-progress`, `verified`,
+`awaiting-captain`, `blocked`, `deferred`, `done`, `accepted`, `rejected`, and
+`cancelled`. `ready` reports only ready tasks with no unresolved blocking
+questions and with every dependency in `done`, `verified`, or `accepted`.
+This is scheduling metadata, not execution authorization or independent
+scientific verification.
+
+Lifecycle questions use stable `OQ-*` IDs in `open-questions/`. `new-question`
+links the question to its task and records the ask, owner, sources, and
+contingency. `blocking` questions block that task; `parked` questions preserve
+its current state. `answer-question` removes only that question's blocker and
+archives the answer. `defer-question` parks the affected task and records an
+explicit activation trigger. `questions` lists unresolved human questions;
+owners are configurable through `questionOwners` (defaults: `captain`,
+`external`). Existing custom owners are retained on refresh.
+
+All mutating commands take `--actor-id` and require an explicitly configured
+actor with `record_self` permission. Read-only `ready` and `questions` need no
+write role. All task dispositions require `--actor-id captain --confirm-captain`
+and a captain actor configured with the required permission. An `accepted`
+disposition additionally requires a `verified` or `awaiting-captain` task.
+These actor assertions are workflow checks, not an OS authentication boundary.
+
+Commands serialize against the canonical context root, preflight their affected
+pages, use atomic writes, and append audit events. The lifecycle validator checks
+IDs, parent heads, dependency and question edges, and terminal routing. Linked
+agent-visible lifecycle nodes can enter bounded task capsules using their stable
+IDs; completed or deferred tasks are not presented as current work.
+
+Bootstrap and refresh add lifecycle routers and marked question rows without
+replacing authored nodes or existing owner lists. The shared hook dispatcher
+and platform-specific bootloaders remain authoritative; legacy zip hooks and
+automatic context commits are not reinstalled.
+Migration that requires editing a locked page waits for that lock to be released.
+
 ## Run Intent And Runbooks
 
 `context/run-intent.html` is a router only. It maps execution intent to a

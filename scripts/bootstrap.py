@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 
 from context_utils import (
@@ -36,6 +37,7 @@ from context_utils import (
     firstmate_root,
     generate_history,
     migrate_firstmate,
+    read_meta,
     resolve_context_page,
     today_utc,
     write_atomic,
@@ -63,6 +65,8 @@ CORE_PAGES = [
     {"name": "decisions.html", "purpose": "Decision graph and rationale", "auto": True},
     {"name": "failure-todos.html", "purpose": "Scoped unresolved failures and repair routing", "auto": True},
     {"name": "workstreams.html", "purpose": "Active work router", "auto": True},
+    {"name": "active-work.html", "purpose": "Task readiness, dependencies, and disposition", "auto": True},
+    {"name": "future-workstreams.html", "purpose": "Deferred questions and activation triggers", "auto": True},
     {"name": "history.html", "purpose": "Historical context and completed work", "auto": True},
     {"name": "open-questions.html", "purpose": "Unresolved assumptions and blocking questions", "auto": True},
     {"name": "reproducibility.html", "purpose": "Setup, tools, environment, and artifact paths", "auto": True},
@@ -411,7 +415,81 @@ SELF_HEALING_CONFIG_DEFAULTS = {
     "contentionBreakMinutes": 3,
     "lockMutexTimeoutSec": 10,
     "scope": "project",
+    "questionOwners": ["captain", "external"],
 }
+
+
+def ensure_lifecycle_pages(context_dir: Path, today: str) -> list[str]:
+    names = ("active-work.html", "active-work/archive.html", "future-workstreams.html",
+             "open-questions.html", "open-questions/archive.html", "index.html")
+    required = {"active-work.html": ("active-work/archive.html",),
+                "open-questions.html": ("CAPTAIN-QUESTION-ROWS",),
+                "open-questions/archive.html": ("QUESTION-ARCHIVE-ROWS",),
+                "index.html": ('href="./active-work.html"', 'href="./future-workstreams.html"')}
+    with ExitStack() as stack:
+        for name in sorted(names):
+            path = resolve_context_page(context_dir, name)
+            stack.enter_context(context_mutex(context_dir, f"lock-{name}"))
+            if (path.exists() and read_meta(path, "locked") == "true"
+                    and any(marker not in path.read_text() for marker in required.get(name, ()))):
+                raise ValueError(f"{name}: release the page lock before lifecycle migration")
+        return _ensure_lifecycle_pages(context_dir, today)
+
+
+def _ensure_lifecycle_pages(context_dir: Path, today: str) -> list[str]:
+    """Add task routers and managed rows while retaining authored content."""
+    updated = []
+    (context_dir / "active-work").mkdir(exist_ok=True)
+    heads = "\n".join(
+        f'<article id="aw-h{number}"><h3>AW-H{number}: {label}</h3>'
+        f'<ul data-auto-head="AW-H{number}"><li>No active child tasks.</li></ul></article>'
+        for number, label in enumerate(("Current execution", "Product evolution", "Quality and closure", "Deferred integrations"), 1)
+    )
+    pages = (
+        ("active-work.html", "Active Work Graph", "HEAD workstreams route child tasks; readiness does not authorize execution.",
+         f'<section><h2>HEAD Workstreams</h2>{heads}</section>',
+         [("Index", "./index.html"), ("Questions", "./open-questions.html"), ("Archive", "./active-work/archive.html")]),
+        ("active-work/archive.html", "Archived Active Work", "Retained task dispositions.",
+         '<section><h2>Archived Tasks</h2><table><tbody><!-- TASK-ARCHIVE-ROWS --></tbody></table></section>',
+         [("Active Work", "../active-work.html")]),
+        ("future-workstreams.html", "Future Workstreams", "Deferred questions and explicit activation triggers.",
+         '<section><h2>Deferred Questions</h2><!-- DEFERRED-QUESTION-ROWS --></section>',
+         [("Active Work", "./active-work.html"), ("Questions", "./open-questions.html")]),
+    )
+    for name, title, summary, body, links in pages:
+        path = resolve_context_page(context_dir, name)
+        if not path.exists():
+            write_simple_page(context_dir, name, title, summary, body, today, links)
+            updated.append(name)
+    markers = {
+        "open-questions.html": ("CAPTAIN-QUESTION-ROWS", '<section id="captain-questions"><h2>Human Questions</h2><table><tbody><!-- CAPTAIN-QUESTION-ROWS --></tbody></table></section>'),
+        "open-questions/archive.html": ("QUESTION-ARCHIVE-ROWS", '<section id="lifecycle-question-archive"><h2>Answered Questions</h2><table><tbody><!-- QUESTION-ARCHIVE-ROWS --></tbody></table></section>'),
+    }
+    for name, (marker, section) in markers.items():
+        path = resolve_context_page(context_dir, name)
+        if path.exists() and marker not in path.read_text():
+            content = path.read_text()
+            if "</main>" not in content:
+                raise ValueError(f"{name}: missing main element for lifecycle migration")
+            write_atomic(path, content.replace("</main>", section + "\n</main>", 1), context_root=context_dir)
+            updated.append(name + " lifecycle rows")
+    active = resolve_context_page(context_dir, "active-work.html")
+    if "active-work/archive.html" not in active.read_text():
+        content = active.read_text()
+        if "</footer>" not in content:
+            raise ValueError("active-work.html: missing footer for archive navigation")
+        write_atomic(active, content.replace("</footer>", '<a href="./active-work/archive.html">Archive</a></footer>', 1), context_root=context_dir)
+        updated.append("active-work archive link")
+    index = resolve_context_page(context_dir, "index.html")
+    if index.exists():
+        content = index.read_text()
+        links = [f'<li><a href="./{name}">{name}</a></li>' for name in ("active-work.html", "future-workstreams.html") if f'href="./{name}"' not in content]
+        if links:
+            if "</ul>" not in content:
+                raise ValueError("index.html: missing navigation list for lifecycle migration")
+            write_atomic(index, content.replace("</ul>", "\n".join(links) + "\n</ul>", 1), context_root=context_dir)
+            updated.append("index lifecycle links")
+    return updated
 
 
 def install_default_profiles(target: Path, context_dir: Path, config: dict) -> list[str]:
@@ -490,6 +568,9 @@ def refresh_context(target: Path, platforms) -> dict:
     for node_dir in ("wiki", "decisions", "failure-todos", "workstreams", "open-questions"):
         (context_dir / node_dir).mkdir(exist_ok=True)
         (context_dir / node_dir / "archived").mkdir(exist_ok=True)
+
+    with context_mutex(context_dir, "task-lifecycle"):
+        updated.extend(ensure_lifecycle_pages(context_dir, today_utc()))
 
     # Copy skill scripts (overwrite — these are skill-owned, not authored)
     scripts_src = SKILL_ROOT / "scripts"
@@ -745,9 +826,11 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
         "autoGenerateDocs": True,
         "ignoreTracks": ["build/**", "dist/**", "vendor/**", "node_modules/**"],
         "scope": scope,
+        "questionOwners": ["captain", "external"],
     }
     # If a config was passed in explicitly, still stamp bootstrap selections on it:
     config_data.setdefault("scope", scope)
+    config_data.setdefault("questionOwners", ["captain", "external"])
     config_data.pop("autoCommitContext", None)
     config_data["platform"] = platform_choice(platforms)
     permission_defaults = load_permission_defaults()
@@ -1380,6 +1463,7 @@ def generate_skeleton(target: Path, pages: list, config: dict = None, scope: str
             write_atomic(page_path, stub_html, context_root=context_dir)
 
     install_bootloaders(target, platforms)
+    ensure_lifecycle_pages(context_dir, today)
     install_platform_hooks(target, platforms, context_dir, scope=scope)
     if scope == "global":
         ensure_firstmate_state(context_dir)

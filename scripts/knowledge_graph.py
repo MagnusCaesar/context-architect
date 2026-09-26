@@ -29,6 +29,7 @@ PATH_KINDS = {
     "failure-todos": "failure",
     "open-questions": "work",
     "workstreams": "work",
+    "active-work": "work",
 }
 
 ROUTERS = {
@@ -43,6 +44,7 @@ ROOT_NON_NODE_PAGES = {
     "wiki.html", "decisions.html", "failure-todos.html", "workstreams.html",
     "history.html", "open-questions.html", "reproducibility.html",
     "run-intent.html", "recognized-commits.html",
+    "active-work.html", "future-workstreams.html",
 }
 
 
@@ -154,7 +156,8 @@ def load_nodes(context_root: Path) -> list[Node]:
             legacy_kind = "decision" if "decision" in attrs.get("class", "").split() else "wiki" if root_wiki else ""
             if not path_kind and not is_v2 and not legacy_kind:
                 continue
-            node_id = _field(attrs, meta, body, "node-id") or _field(attrs, meta, body, "id")
+            node_id = (_field(attrs, meta, body, "node-id") or meta.get("task-id")
+                       or meta.get("question-id") or _field(attrs, meta, body, "id"))
             if not node_id and (path_kind or legacy_kind):
                 node_id = path.stem
             if not node_id:
@@ -165,6 +168,8 @@ def load_nodes(context_root: Path) -> list[Node]:
             status = _field(attrs, meta, body, "status").lower() or _default_status(kind)
             parent = _field(attrs, meta, body, "parent") or None
             statement = _field(attrs, meta, body, "statement")
+            if not statement and (meta.get("task-id") or meta.get("question-id")):
+                statement = meta.get("summary") or meta.get("ask", "")
             if not statement:
                 match = re.search(r'<(?:section|p)\b[^>]*(?:id|class)=["\'][^"\']*statement[^"\']*["\'][^>]*>(.*?)</(?:section|p)>', body, flags=re.I | re.S)
                 statement = _strip(match.group(1)) if match else ""

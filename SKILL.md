@@ -88,3 +88,8 @@ project-specific payload to the framework.
 For cheap reads, use `context/scripts/extract-body.py` on context HTML. Prefer
 context-mode for other analysis when available; it remains a companion, not a
 runtime dependency or contract authority.
+
+For dependency-aware task selection, human blockers, deferral, and task
+disposition, use the installed `context/scripts/task-lifecycle.py`. Read only
+the [task lifecycle contract](docs/contracts.md#task-and-human-question-lifecycle)
+when operating or changing that workflow. Task readiness never authorizes execution.

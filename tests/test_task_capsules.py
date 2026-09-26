@@ -25,6 +25,29 @@ FORBIDDEN_MODEL_TEXT = (
 )
 
 
+@pytest.mark.parametrize("directory,id_field,node_id,status,statement,label", [
+    ("active-work", "task-id", "AW-001", "ready", "Verify the scoped parser change.", "Task"),
+    ("open-questions", "question-id", "OQ-001", "blocking", "Which parser format is approved?", "Question"),
+])
+def test_lifecycle_nodes_use_stable_ids_in_bounded_capsules(tmp_path, directory, id_field, node_id, status, statement, label):
+    root = make_root(tmp_path)
+    path = root / directory / f"{node_id.lower()}-fixture.html"
+    path.parent.mkdir()
+    statement_field = "summary" if id_field == "task-id" else "ask"
+    path.write_text(f'''<html><head>
+<meta name="{id_field}" content="{node_id}">
+<meta name="{statement_field}" content="{statement}">
+<meta name="visibility" content="agent">
+<meta name="status" content="{status}">
+</head><body><article id="{node_id}"></article></body></html>''')
+    link = f"{path.relative_to(root).as_posix()}#{node_id}"
+    capsule = build_capsule(root, {"task": "Review the linked task", "links": [link]}, [], "worker")
+    assert capsule.node_ids == (node_id,)
+    assert f"{label}: {statement}" in capsule.text
+    assert link in capsule.text
+    assert len(capsule.text) <= 4000
+
+
 def make_root(tmp_path: Path, name: str = "project") -> Path:
     project = tmp_path / name
     root = project / "context"

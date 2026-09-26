@@ -26,12 +26,12 @@ from knowledge_graph import Node, load_nodes
 
 HARD_MAX_CHARS = 4000
 HARD_MAX_NODES = 8
-MODEL_GRAPH_DIRS = {"wiki", "decisions", "failure-todos", "open-questions", "workstreams"}
+MODEL_GRAPH_DIRS = {"wiki", "decisions", "failure-todos", "open-questions", "workstreams", "active-work"}
 VISIBLE = {
     "wiki": {"active"},
     "decision": {"accepted", "implemented"},
     "failure": {"open", "authorized", "blocked"},
-    "work": {"blocked"},
+    "work": {"blocked", "ready", "in-progress", "verified", "awaiting-captain", "blocking", "parked"},
 }
 LABEL = {"wiki": "Fact", "decision": "Decision", "failure": "Blocker", "work": "Blocker"}
 
@@ -224,7 +224,12 @@ def build_capsule(
             break
         link = f"{node.path.relative_to(context_root).as_posix()}#{node.node_id}"
         statement = _one_line(node.statement)
-        prefix = f"\n- {LABEL[node.kind]}: "
+        label = LABEL[node.kind]
+        if read_meta(node.path, "task-id") and node.status != "blocked":
+            label = "Task"
+        elif read_meta(node.path, "question-id"):
+            label = "Question"
+        prefix = f"\n- {label}: "
         suffix = f" [{link}]"
         remaining = limit - len(text) - len(prefix) - len(suffix)
         if remaining <= 1:

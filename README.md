@@ -46,6 +46,7 @@ python3 scripts/bootstrap.py --target /path/to/project --platform both
 | Bounded task capsules and hash-backed receipts | Yes | Yes | Verified: adversarial capsule/restore fixtures |
 | Mutex, append-only ledger, source claims, and agent tree | Yes | Yes | Verified: concurrency and stale-owner fixtures |
 | Private global Firstmate inbox and project registry | Yes | Yes | Verified: lifecycle/privacy fixtures |
+| Task readiness, human blockers, deferral, and captain disposition | Yes | Yes | Verified: task lifecycle and capsule fixtures |
 | Semantic lead/balanced/economy model policy | Native Claude choice unchanged | Sol/Terra/Luna policy | Verified: catalog, fallback, conflict, rollback fixtures |
 | Tagged self-extractor for one or both harnesses | Yes | Yes | Verified: clean-tag, payload, archive, checksum tests |
 
@@ -61,6 +62,8 @@ context/
 ├── decisions.html + decisions/ HEAD decisions and their descendants
 ├── failure-todos.html + failure-todos/
 ├── workstreams.html + workstreams/
+├── active-work.html + active-work/      dependency-aware task lifecycle
+├── future-workstreams.html             deferred questions and activation triggers
 ├── open-questions.html + open-questions/  compatibility graph
 ├── control-plane.html
 ├── ledger-events.ndjson        append-only events and capsule receipts
@@ -88,6 +91,16 @@ Codex roles default to:
 | economy (Haiku-equivalent) | `gpt-5.6-luna` | medium | Terra/low when direct Luna override is rejected; profile discloses both |
 
 Model discovery is fail-closed and changes only during explicit Codex `--refresh`. See [Codex compatibility](docs/codex-compatibility.md).
+
+Task lifecycle commands are installed in each target's `context/scripts/task-lifecycle.py`.
+`ready` lists dependency-satisfied tasks; `questions` lists unresolved human questions.
+`new-task`, `new-question`, `answer-question`, `defer-question`, `archive-task`, and
+`render` maintain linked tasks, blockers, dispositions, and routers. Readiness does
+not grant permission to run work. See [task lifecycle contracts](docs/contracts.md#task-and-human-question-lifecycle)
+for actor permissions, supported states, and captain confirmation.
+
+The [zip integration report](docs/zip-integration-2026-09-26.md) records the imported
+feature delta and the newer adapters retained from `codex-firstmate-overhaul`.
 
 ## Development
 
