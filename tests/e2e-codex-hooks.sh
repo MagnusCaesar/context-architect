@@ -206,9 +206,9 @@ configured = json.loads((project / ".codex/hooks.json").read_text())
 assert "e2e-unrelated" in json.dumps(configured)
 assert "hook_dispatch.py" in json.dumps(configured)
 economy = (project / ".codex/agents/economy.toml").read_text()
-assert 'model = "gpt-5.6-terra"' in economy
-assert 'model_reasoning_effort = "low"' in economy
-assert "Desired gpt-5.6-luna/medium; actual gpt-5.6-terra/low" in economy
+assert 'model = "gpt-6-luna"' in economy
+assert 'model_reasoning_effort = "medium"' in economy
+assert "Desired gpt-6-luna/medium; actual gpt-6-luna/medium" in economy
 
 def dispatch(event, payload):
     completed = subprocess.run(

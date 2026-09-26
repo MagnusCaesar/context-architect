@@ -44,7 +44,7 @@ from context_utils import (
     write_context_locator,
 )
 from hook_dispatch import LEGACY_HOOK_NAMES, merge_hook_config
-from model_policy import (DIRECT_REJECTED_MODELS, CatalogError, DEFAULT_POLICY,
+from model_policy import (CatalogError, DEFAULT_POLICY,
                           PolicyConflict, bundle_digests, direct_surface_roles,
                           fetch_catalog, refresh_policy, resolve_roles,
                           write_policy_bundle)
@@ -512,7 +512,7 @@ def refresh_codex_profiles(target: Path, context_dir: Path) -> dict:
         current = config.get("modelPolicy", json.loads(json.dumps(DEFAULT_POLICY)))
         updated, changes, notices = refresh_policy(current, catalog, refresh=True)
         try:
-            roles = resolve_roles(catalog, updated, rejected_models=set(DIRECT_REJECTED_MODELS))
+            roles = resolve_roles(catalog, updated)
             config["modelPolicy"] = updated
             write_policy_bundle(target, config_path, config, roles, updated, expected=expected)
         except (CatalogError, OSError, PolicyConflict, ValueError) as exc:

@@ -1,5 +1,5 @@
 name = "balanced"
-description = "Implementation and focused review"
+description = "Default routine coordination, implementation, and focused review"
 model = "{model}"
 model_reasoning_effort = "{effort}"
 sandbox_mode = "workspace-write"

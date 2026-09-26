@@ -14,16 +14,17 @@ import tomllib
 import warnings
 from pathlib import Path
 
-POLICY_REVISION = "2026-08-02.1"
+POLICY_REVISION = "2026-09-26.1"
 DEFAULT_POLICY = {
     "revision": POLICY_REVISION,
-    "lead": {"model": "gpt-5.6-sol", "effort": "high"},
-    "balanced": {"model": "gpt-5.6-terra", "effort": "medium"},
-    "economy": {"model": "gpt-5.6-luna", "effort": "medium"},
+    "lead": {"model": "gpt-6-astra", "effort": "high"},
+    "balanced": {"model": "gpt-6-sol", "effort": "medium"},
+    "economy": {"model": "gpt-6-luna", "effort": "medium"},
 }
 ROLES = ("lead", "balanced", "economy")
-DIRECT_REJECTED_MODELS = frozenset({"gpt-5.6-luna"})
-DIRECT_SUPPORTED_MODELS = frozenset({"gpt-5.6-sol", "gpt-5.6-terra"})
+DIRECT_SUPPORTED_MODELS = frozenset({
+    "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+})
 REQUIRED_FIELDS = ("id", "model", "displayName", "hidden", "isDefault",
                    "defaultReasoningEffort", "supportedReasoningEfforts")
 TEMPLATES = Path(__file__).resolve().parent.parent / "templates" / "agents"
@@ -92,10 +93,10 @@ def resolve_roles(items: list[dict], policy: dict | None = None,
         item = catalog.get(slug)
         unavailable = not item or item["hidden"] or slug in rejected
         if unavailable and role == "economy":
-            fallback = catalog.get("gpt-5.6-terra")
-            if fallback and not fallback["hidden"] and "gpt-5.6-terra" not in rejected and "low" in _efforts(fallback):
-                warnings.warn(f"economy requested {slug}/{effort} unavailable; actual gpt-5.6-terra/low", UserWarning)
-                resolved[role] = ("gpt-5.6-terra", "low")
+            fallback = catalog.get("gpt-6-sol")
+            if fallback and not fallback["hidden"] and "gpt-6-sol" not in rejected and "low" in _efforts(fallback):
+                warnings.warn(f"economy requested {slug}/{effort} unavailable; actual gpt-6-sol/low", UserWarning)
+                resolved[role] = ("gpt-6-sol", "low")
                 continue
         if unavailable:
             raise CatalogError(f"{role} model unavailable: {slug}")
@@ -231,11 +232,11 @@ def _digest(path: Path) -> str | None:
 
 
 def direct_surface_roles(policy: dict | None = None) -> dict[str, tuple[str, str]]:
-    """Conservative defaults for the currently verified direct-subagent surface."""
+    """Defaults for the advertised direct-subagent surface."""
     policy = policy or DEFAULT_POLICY
     roles = {role: (policy[role]["model"], policy[role]["effort"]) for role in ROLES}
-    fallbacks = {"lead": ("gpt-5.6-sol", "high"), "balanced": ("gpt-5.6-terra", "medium"),
-                 "economy": ("gpt-5.6-terra", "low")}
+    fallbacks = {"lead": ("gpt-6-sol", "high"), "balanced": ("gpt-6-sol", "medium"),
+                 "economy": ("gpt-6-sol", "low")}
     for role in ROLES:
         if roles[role][0] not in DIRECT_SUPPORTED_MODELS:
             roles[role] = fallbacks[role]

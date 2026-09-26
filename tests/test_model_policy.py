@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from model_policy import (  # noqa: E402
     CatalogError,
     DEFAULT_POLICY,
+    direct_surface_roles,
     fetch_catalog,
     refresh_policy,
     render_profiles,
@@ -29,7 +30,7 @@ def model(model_id, efforts=("low", "medium", "high"), default="medium", **extra
         "displayName": model_id,
         "description": f"fixture for {model_id}",
         "hidden": False,
-        "isDefault": model_id == "gpt-5.6-sol",
+        "isDefault": model_id == "gpt-6-astra",
         "defaultReasoningEffort": default,
         "supportedReasoningEfforts": [
             {"reasoningEffort": effort, "description": effort} for effort in efforts
@@ -42,52 +43,102 @@ def model(model_id, efforts=("low", "medium", "high"), default="medium", **extra
 
 
 CURRENT_CATALOG = [
+    model("gpt-6-astra", ("low", "medium", "high", "xhigh", "max", "ultra")),
+    model("gpt-6-sol", ("low", "medium", "high", "xhigh", "max", "ultra")),
+    model("gpt-6-luna", ("low", "medium", "high", "xhigh", "max")),
     model("gpt-5.6-sol", ("low", "medium", "high", "xhigh", "max", "ultra")),
     model("gpt-5.6-terra", ("low", "medium", "high", "xhigh", "max", "ultra")),
-    model("gpt-5.6-luna", ("low", "medium", "high", "xhigh", "max")),
 ]
 
 
 def test_current_catalog_maps_semantic_roles():
     assert resolve_roles(CURRENT_CATALOG) == {
-        "lead": ("gpt-5.6-sol", "high"),
-        "balanced": ("gpt-5.6-terra", "medium"),
-        "economy": ("gpt-5.6-luna", "medium"),
+        "lead": ("gpt-6-astra", "high"),
+        "balanced": ("gpt-6-sol", "medium"),
+        "economy": ("gpt-6-luna", "medium"),
     }
+
+
+def test_config_template_uses_current_policy_defaults():
+    config = json.loads((ROOT / "templates" / "config.json").read_text())
+    assert config["modelPolicy"] == DEFAULT_POLICY
 
 
 def test_unverified_configured_slug_is_desired_not_actual():
     policy = json.loads(json.dumps(DEFAULT_POLICY)); policy["lead"]["model"] = "unverified-lead"
     roles = model_policy.direct_surface_roles(policy)
-    assert roles["lead"] == ("gpt-5.6-sol", "high")
-    assert "Desired unverified-lead/high; actual gpt-5.6-sol/high" in render_profiles(roles, policy)["lead.toml"]
+    assert roles["lead"] == ("gpt-6-sol", "high")
+    assert "Desired unverified-lead/high; actual gpt-6-sol/high" in render_profiles(roles, policy)["lead.toml"]
+    assert 'description = "gpt-6-sol ' in render_profiles(roles, policy)["lead.toml"]
+
+
+def test_direct_surface_keeps_gpt6_and_legacy_sol_terra_pins():
+    assert direct_surface_roles() == {
+        "lead": ("gpt-6-astra", "high"),
+        "balanced": ("gpt-6-sol", "medium"),
+        "economy": ("gpt-6-luna", "medium"),
+    }
+    policy = json.loads(json.dumps(DEFAULT_POLICY))
+    policy["lead"] = {"model": "gpt-5.6-sol", "effort": "high"}
+    policy["balanced"] = {"model": "gpt-5.6-terra", "effort": "medium"}
+    assert direct_surface_roles(policy)["lead"] == ("gpt-5.6-sol", "high")
+    assert direct_surface_roles(policy)["balanced"] == ("gpt-5.6-terra", "medium")
+
+
+def test_unknown_direct_role_models_fall_back_to_sol_never_astra():
+    policy = {"revision": "custom"}
+    policy.update({role: {"model": f"unknown-{role}", "effort": "low"} for role in model_policy.ROLES})
+    assert direct_surface_roles(policy) == {
+        "lead": ("gpt-6-sol", "high"),
+        "balanced": ("gpt-6-sol", "medium"),
+        "economy": ("gpt-6-sol", "low"),
+    }
 
 
 @pytest.mark.parametrize("unavailable", ["missing", "rejected"])
-def test_luna_unavailable_falls_back_truthfully(unavailable):
-    catalog = CURRENT_CATALOG[:-1] if unavailable == "missing" else CURRENT_CATALOG
-    rejected = {"gpt-5.6-luna"} if unavailable == "rejected" else set()
-    with pytest.warns(UserWarning, match="actual gpt-5.6-terra/low"):
+def test_economy_unavailable_falls_back_to_sol_low_truthfully(unavailable):
+    catalog = [item for item in CURRENT_CATALOG if item["model"] != "gpt-6-luna"] if unavailable == "missing" else CURRENT_CATALOG
+    rejected = {"gpt-6-luna"} if unavailable == "rejected" else set()
+    with pytest.warns(UserWarning, match="actual gpt-6-sol/low"):
         roles = resolve_roles(catalog, rejected_models=rejected)
-    assert roles["economy"] == ("gpt-5.6-terra", "low")
+    assert roles["economy"] == ("gpt-6-sol", "low")
     rendered = render_profiles(roles, requested=DEFAULT_POLICY)
-    assert "actual gpt-5.6-terra/low" in rendered["economy.toml"]
-    assert 'model = "gpt-5.6-terra"' in rendered["economy.toml"]
+    assert "actual gpt-6-sol/low" in rendered["economy.toml"]
+    assert 'model = "gpt-6-sol"' in rendered["economy.toml"]
+
+
+@pytest.mark.parametrize("invalid_fallback", ["missing", "hidden", "rejected", "no-low"])
+def test_economy_fallback_fails_closed_when_sol_low_is_unavailable(invalid_fallback):
+    catalog = [dict(item) for item in CURRENT_CATALOG]
+    policy = json.loads(json.dumps(DEFAULT_POLICY))
+    policy["balanced"]["model"] = "gpt-5.6-terra"
+    rejected = {"gpt-6-luna"}
+    fallback = next(item for item in catalog if item["model"] == "gpt-6-sol")
+    if invalid_fallback == "missing":
+        catalog.remove(fallback)
+    elif invalid_fallback == "hidden":
+        fallback["hidden"] = True
+    elif invalid_fallback == "rejected":
+        rejected.add("gpt-6-sol")
+    else:
+        fallback["supportedReasoningEfforts"] = ["medium", "high"]
+    with pytest.raises(CatalogError, match="economy model unavailable"):
+        resolve_roles(catalog, policy=policy, rejected_models=rejected)
 
 
 def test_unsupported_effort_uses_documented_default():
-    catalog = [*CURRENT_CATALOG[:2], model("gpt-5.6-luna", ("low",), default="low")]
+    catalog = [*CURRENT_CATALOG[:2], model("gpt-6-luna", ("low",), default="low")]
     with pytest.warns(UserWarning, match="documented default low"):
-        assert resolve_roles(catalog)["economy"] == ("gpt-5.6-luna", "low")
+        assert resolve_roles(catalog)["economy"] == ("gpt-6-luna", "low")
 
 
 @pytest.mark.parametrize(
     "bad",
     [
-        [model("gpt-5.6-sol"), model("gpt-5.6-sol")],
-        [{**model("gpt-5.6-sol"), "model": "other"}],
-        [{k: v for k, v in model("gpt-5.6-sol").items() if k != "displayName"}],
-        [{**model("gpt-5.6-sol"), "supportedReasoningEfforts": []}],
+        [model("gpt-6-astra"), model("gpt-6-astra")],
+        [{**model("gpt-6-astra"), "model": "other"}],
+        [{k: v for k, v in model("gpt-6-astra").items() if k != "displayName"}],
+        [{**model("gpt-6-astra"), "supportedReasoningEfforts": []}],
     ],
 )
 def test_catalog_validation_rejects_ambiguous_or_incomplete_items(bad):
@@ -168,7 +219,7 @@ def test_refresh_applies_only_explicit_available_upgrade():
     assert unchanged == DEFAULT_POLICY and not changes
     updated, changes, warnings = refresh_policy(DEFAULT_POLICY, catalog, refresh=True)
     assert updated["lead"]["model"] == "gpt-5.7-sol"
-    assert changes == ["lead: gpt-5.6-sol -> gpt-5.7-sol"]
+    assert changes == ["lead: gpt-6-astra -> gpt-5.7-sol"]
 
 
 @pytest.mark.parametrize(

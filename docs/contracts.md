@@ -243,9 +243,22 @@ Semantic roles replace provider-specific names:
 
 | Role | Desired policy | Current direct-surface fallback |
 |------|----------------|---------------------------------|
-| `lead` (Opus-equivalent) | `gpt-5.6-sol` / `high` | same |
-| `balanced` (Sonnet-equivalent) | `gpt-5.6-terra` / `medium` | same |
-| `economy` (Haiku-equivalent) | `gpt-5.6-luna` / `medium` | `gpt-5.6-terra` / `low` while direct Luna selection is rejected |
+| `lead`, explicit Astra request | `gpt-6-astra` / `high` | same |
+| `balanced`, routine work | `gpt-6-sol` / `medium` | same |
+| `economy`, bounded delegation | `gpt-6-luna` / `medium` | same |
+
+Policy revision `2026-09-26.1` applies to new bootstrap defaults. Use balanced
+for routine implementation/coordination and economy for bounded delegated work.
+Selecting lead requires an explicit user request for Astra; it is never an
+automatic cost escalation. These selection instructions guide the parent;
+profile generation does not intercept arbitrary native spawn calls.
+If economy is missing, hidden, or explicitly rejected, catalog resolution may
+use visible, supported `gpt-6-sol` / `low`, with a warning and truthful profile.
+Missing lead/balanced catalog models fail closed. The direct-surface fallback
+for an unknown configured model uses Sol (high/medium/low by role), never Astra.
+Explicit supported legacy pins remain intact. Existing project policies are
+preserved by refresh unless the catalog advertises a valid upgrade edge; a new
+framework default alone does not rewrite them.
 
 Generated `.codex/agents/*.toml` profiles disclose desired and actual values.
 Subagents isolate conversation threads, not filesystems; they inherit active

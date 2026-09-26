@@ -17,6 +17,7 @@ All notable changes are recorded here. Release headings use exact Git tags so `p
 
 ### Changed
 
+- Updated new-bootstrap model defaults to GPT-6 Astra/Sol/Luna, with Sol for routine work, Luna for bounded delegation, and Astra selected only on explicit request. Removed the obsolete default Luna rejection and documented context-recovery gaps.
 - Imported `contarch-15d5dd0` as the preserved Claude-focused baseline, then adapted behavior through shared harness-neutral contracts.
 - Replaced model-visible hygiene narration with concise task/result/scope/fact/decision/blocker capsules.
 - Consolidated lifecycle scripts behind normalized Claude and Codex event schemas while retaining Git pre/post-commit hooks.

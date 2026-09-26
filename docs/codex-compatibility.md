@@ -2,7 +2,33 @@
 
 This page records Codex facts and evidence boundaries. Behavioral schemas remain in [contracts](contracts.md); this page avoids duplicating them.
 
-## Verified baseline
+## Model policy update: 2026-09-26
+
+New bootstrap defaults use `gpt-6-astra` (lead/high), `gpt-6-sol`
+(balanced/medium), and `gpt-6-luna` (economy/medium). Sol handles routine
+coordination and implementation; Luna handles bounded delegation. Astra is
+selected only on an explicit user request. The model names and workload split
+are supported by the [official model catalog](https://developers.openai.com/api/docs/models)
+and [GPT-6 migration guidance](https://developers.openai.com/api/docs/guides/latest-model),
+checked on 2026-09-26. The framework emits Codex profiles; it does not make
+direct model inference API requests.
+
+The active collaboration tool advertises all three GPT-6 models, and three
+GPT-6 Luna audit subagents completed in this session. Astra was not exercised.
+This evidence does not establish generated CLI profile execution or lifecycle
+hook delivery. The older Luna rejection below belongs to the August probe;
+it is no longer an unconditional restriction in new defaults.
+
+The [2026-09-26 recovery audit](context-recovery-audit-2026-09-26.md) found
+ordinary-project injection, capture, compaction, and token-budget gaps.
+Those findings remain open; the model update does not fix them.
+
+The model-policy update passed the automated release gate: 251 pytest cases,
+101 smoke checks, script syntax checks, documentation contracts, and diff
+validation. Skill metadata validation also passed. No live lifecycle probe
+was rerun for this update.
+
+## Historical verified baseline: 2026-08-02
 
 | Item | Evidence as of 2026-08-02 |
 |---|---|
@@ -21,7 +47,7 @@ Official watch sources: [Codex changelog](https://developers.openai.com/codex/ch
 
 ## Hooks and subagents
 
-The dispatcher normalizes supported lifecycle inputs for `UserPromptSubmit`, `PreCompact`, `PostCompact`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, and `SessionEnd`; Claude also installs `SessionStart`. Generated project configuration is merged by managed identity, preserving unrelated user/plugin hooks and their order.
+The dispatcher normalizes lifecycle inputs for `UserPromptSubmit`, `PreCompact`, `PostCompact`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, and `SessionEnd`. Generated global configuration also installs `SessionStart`; its dispatcher branch is currently inert. Configuration is merged by managed identity, preserving unrelated user/plugin hooks and their order.
 
 A local 2026-08-02 probe observed project hooks on subagent lifecycle and child tool calls, including `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, and `PostToolUse`. Stop completion was inconclusive after timeout. Treat those observations as a dated probe, not a permanent upstream guarantee.
 
@@ -57,11 +83,16 @@ The generated agent capsule contains task, expected result, scope, and only rele
 
 ## Model policy
 
-| Role | Desired catalog model | Desired effort | Current direct-spawn behavior |
+| Role | Desired catalog model | Desired effort | Current configured direct behavior |
 |---|---|---:|---|
-| lead / Opus-equivalent | `gpt-5.6-sol` | high | Sol/high |
-| balanced / Sonnet-equivalent | `gpt-5.6-terra` | medium | Terra/medium |
-| economy / Haiku-equivalent | `gpt-5.6-luna` | medium | Current direct override rejects Luna; use Terra/low and disclose desired + actual |
+| lead, explicit Astra request | `gpt-6-astra` | high | Astra/high |
+| balanced, routine work | `gpt-6-sol` | medium | Sol/medium |
+| economy, bounded delegation | `gpt-6-luna` | medium | Luna/medium; catalog fallback Sol/low if unavailable |
+
+The August policy requested `gpt-5.6-luna` and generated Terra/low on that
+probe's restricted surface. Historical results below retain that provenance.
+New defaults no longer impose that rejection. Profile instructions govern
+selection; they do not enforce a model-spend boundary around native tool calls.
 
 Catalog discovery uses the app-server JSON-RPC sequence `initialize` → `initialized` → paginated `model/list`. Validation rejects missing fields, duplicate/ambiguous models, hidden targets, unsupported efforts, malformed upgrade metadata, timeouts, and conflicting on-disk profiles.
 
@@ -92,7 +123,7 @@ Not verified as a durable guarantee:
 
 - Future Codex hook names or payload fields not present in fixtures.
 - Hook inheritance behavior after later CLI releases.
-- Direct Luna override support after later model releases.
+- GPT-6 generated-profile execution and direct overrides on other runtimes.
 - Actual economy child execution in the fresh E2E; the parent completed without calling `spawn_agent`, so only generated-profile fallback was verified.
 - Remote sandbox, MCP/plugin, IDE, or wrapper-specific policies.
 - `Stop` and `SessionEnd` in a completed live run.

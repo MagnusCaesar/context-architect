@@ -196,9 +196,13 @@ def test_codex_profiles_are_concise_and_truthful(tmp_path):
         assert "hook composition" in text.lower()
         assert "parent safety overrides" in text.lower()
     economy = tomllib.loads((profiles / "economy.toml").read_text())
-    assert economy["model"] == "gpt-5.6-terra"
-    assert economy["model_reasoning_effort"] == "low"
-    assert "Desired gpt-5.6-luna/medium; actual gpt-5.6-terra/low" in economy["developer_instructions"]
+    assert economy["model"] == "gpt-6-luna"
+    assert economy["model_reasoning_effort"] == "medium"
+    assert "Desired gpt-6-luna/medium; actual gpt-6-luna/medium" in economy["developer_instructions"]
+    lead = tomllib.loads((profiles / "lead.toml").read_text())
+    assert lead["model"] == "gpt-6-astra"
+    assert "explicit user request" in lead["description"]
+    assert "only when the user explicitly requests Astra" in (target / "AGENTS.md").read_text()
 
 
 def test_claude_refresh_never_adds_codex_model_policy(tmp_path):

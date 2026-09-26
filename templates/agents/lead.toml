@@ -1,5 +1,5 @@
 name = "lead"
-description = "Orchestration, architecture, and final review"
+description = "{model} architecture and difficult review; Astra requires an explicit user request"
 model = "{model}"
 model_reasoning_effort = "{effort}"
 sandbox_mode = "workspace-write"

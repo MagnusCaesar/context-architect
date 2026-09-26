@@ -47,7 +47,7 @@ python3 scripts/bootstrap.py --target /path/to/project --platform both
 | Mutex, append-only ledger, source claims, and agent tree | Yes | Yes | Verified: concurrency and stale-owner fixtures |
 | Private global Firstmate inbox and project registry | Yes | Yes | Verified: lifecycle/privacy fixtures |
 | Task readiness, human blockers, deferral, and captain disposition | Yes | Yes | Verified: task lifecycle and capsule fixtures |
-| Semantic lead/balanced/economy model policy | Native Claude choice unchanged | Sol/Terra/Luna policy | Verified: catalog, fallback, conflict, rollback fixtures |
+| Semantic lead/balanced/economy model policy | Native Claude choice unchanged | GPT-6 Astra/Sol/Luna policy | Verified: catalog, fallback, conflict, rollback fixtures |
 | Tagged self-extractor for one or both harnesses | Yes | Yes | Verified: clean-tag, payload, archive, checksum tests |
 
 Verified means automated repository tests unless the compatibility page labels a dated local CLI probe. Not verified: every future Codex/Claude release, every plugin combination, remote sandbox policy, and third-party wrapper behavior. See [Codex compatibility](docs/codex-compatibility.md) for exact evidence and gaps; [contracts](docs/contracts.md) remain behavioral authority.
@@ -86,9 +86,15 @@ Codex roles default to:
 
 | Semantic role | Desired model | Effort | Direct-spawn actual |
 |---|---|---:|---|
-| lead (Opus-equivalent) | `gpt-5.6-sol` | high | Sol/high |
-| balanced (Sonnet-equivalent) | `gpt-5.6-terra` | medium | Terra/medium |
-| economy (Haiku-equivalent) | `gpt-5.6-luna` | medium | Terra/low when direct Luna override is rejected; profile discloses both |
+| lead, explicit Astra request | `gpt-6-astra` | high | Astra/high |
+| balanced, routine implementation and coordination | `gpt-6-sol` | medium | Sol/medium |
+| economy, bounded delegated work | `gpt-6-luna` | medium | Luna/medium |
+
+Use Sol for routine work and Luna for bounded delegation. Select Astra only
+when the user explicitly requests it. An unavailable economy model may fall
+back to Sol/low after catalog validation; profiles disclose desired and actual
+models. This routing policy follows the [GPT-6 model family](https://developers.openai.com/api/docs/models)
+and preserves explicit model choices. Availability still depends on the active harness.
 
 Model discovery is fail-closed and changes only during explicit Codex `--refresh`. See [Codex compatibility](docs/codex-compatibility.md).
 
@@ -101,6 +107,9 @@ for actor permissions, supported states, and captain confirmation.
 
 The [zip integration report](docs/zip-integration-2026-09-26.md) records the imported
 feature delta and the newer adapters retained from `codex-firstmate-overhaul`.
+The [context recovery audit](docs/context-recovery-audit-2026-09-26.md) records
+remaining automation gaps and the proposed order of improvements. Automatic
+context recovery without agent chores is a target, not yet a verified guarantee.
 
 ## Development
 
